@@ -1,0 +1,108 @@
+# OpenIntuneBaseline to mobileconfig Mapping
+#
+# This file defines which OIB profiles should be converted and where
+# they should be saved in the output directory.
+#
+# Format:
+#   - oib_name: The exact filename from OIB (without .json extension)
+#     output_path: Relative path from output/ directory for the mobileconfig
+#     payload_type: (Optional) Override automatic PayloadType detection
+#     enabled: true/false to enable/disable conversion
+#     notes: (Optional) Description or notes about this profile
+
+profiles:
+  # Microsoft Defender Profiles
+  - oib_name: "MacOS - OIB - Defender Antivirus - D - Antivirus Configuration - v1.0"
+    output_path: "defender/antivirus-config.mobileconfig"
+    enabled: true
+    notes: "Defender antivirus settings - scan preferences, threat actions"
+
+  - oib_name: "MacOS - OIB - Defender Antivirus - D - MDE Configuration - v1.0"
+    output_path: "defender/mde-config.mobileconfig"
+    enabled: true
+    notes: "Microsoft Defender for Endpoint configuration"
+
+  # System Security Profiles
+  - oib_name: "MacOS - OIB - Device Security - D - Restrictions - v1.0"
+    output_path: "system/device-restrictions.mobileconfig"
+    enabled: true
+    notes: "Device security restrictions and policies"
+
+  - oib_name: "MacOS - OIB - Device Security - D - Accounts and Login - v1.0"
+    output_path: "system/accounts-login.mobileconfig"
+    enabled: true
+    notes: "Account management and login policies"
+
+  - oib_name: "MacOS - OIB - Disk Encryption - D - FileVault - v1.0"
+    output_path: "system/filevault.mobileconfig"
+    enabled: true
+    notes: "FileVault disk encryption configuration"
+
+  - oib_name: "MacOS - OIB - Firewall - D - Gatekeeper - v1.0"
+    output_path: "system/gatekeeper.mobileconfig"
+    enabled: true
+    notes: "Gatekeeper and firewall settings"
+
+  # Software Updates
+  - oib_name: "MacOS - OIB - Updates - D - Update Configuration - v1.0"
+    output_path: "system/software-updates.mobileconfig"
+    enabled: true
+    notes: "Automatic software update configuration"
+
+  # Microsoft 365 Applications
+  - oib_name: "MacOS - OIB - Microsoft Office - D - Office Configuration - v1.0"
+    output_path: "office/office-config.mobileconfig"
+    enabled: true
+    notes: "Microsoft Office suite configuration"
+
+  - oib_name: "MacOS - OIB - Microsoft Edge - D - Security - v1.0"
+    output_path: "edge/security.mobileconfig"
+    enabled: true
+    notes: "Microsoft Edge security settings"
+
+  - oib_name: "MacOS - OIB - Microsoft Edge - D - Password Management - v1.0"
+    output_path: "edge/password-management.mobileconfig"
+    enabled: true
+    notes: "Edge password manager configuration"
+
+  - oib_name: "MacOS - OIB - Microsoft Edge - U - Extensions - v1.0"
+    output_path: "edge/extensions.mobileconfig"
+    enabled: true
+    notes: "Edge browser extension policies (user-level)"
+
+  - oib_name: "MacOS - OIB - Microsoft Edge - U - Profiles, Sign-In and Sync - v1.0"
+    output_path: "edge/profiles-signin-sync.mobileconfig"
+    enabled: true
+    notes: "Edge profile and sync settings (user-level)"
+
+  - oib_name: "MacOS - OIB - Microsoft Edge - U - Updates - v1.0"
+    output_path: "edge/updates.mobileconfig"
+    enabled: true
+    notes: "Edge auto-update configuration (user-level)"
+
+  - oib_name: "MacOS - OIB - Microsoft AutoUpdate - D - MAU Configuration - v1.0"
+    output_path: "mau/mau-config.mobileconfig"
+    enabled: true
+    notes: "Microsoft AutoUpdate (MAU) configuration for all M365 apps"
+
+  - oib_name: "MacOS - OIB - Microsoft OneDrive - D - Service and Access - v1.0"
+    output_path: "onedrive/service-access.mobileconfig"
+    enabled: true
+    notes: "OneDrive service configuration and access policies"
+
+  - oib_name: "MacOS - OIB - Microsoft OneDrive - U - Known Folder Move - v1.0"
+    output_path: "onedrive/known-folder-move.mobileconfig"
+    enabled: true
+    notes: "OneDrive Known Folder Move (Desktop, Documents, Pictures)"
+
+  # Authentication
+  - oib_name: "MacOS - OIB - Authentication - D - Platform SSO - v1.0"
+    output_path: "system/platform-sso.mobileconfig"
+    enabled: true
+    notes: "Platform SSO configuration for Entra ID"
+
+# Configuration options
+config:
+  organization: "Talieisin"
+  default_scope: "System"
+  removal_disallowed: true
