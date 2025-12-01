@@ -24,27 +24,56 @@ import plistlib
 import sys
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Optional
+
+# Schema older than this triggers a warning
+SCHEMA_MAX_AGE_DAYS = 90
 
 try:
     import yaml
 except ImportError:
-    print("Error: PyYAML not installed. Run: pip3 install pyyaml")
-    sys.exit(1)
+    yaml = None  # Will be checked at runtime
 
 try:
     import requests
 except ImportError:
-    print("Error: requests not installed. Run: pip3 install requests")
-    sys.exit(1)
+    requests = None  # Will be checked at runtime
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+# Logger - configured in main() to avoid side effects when used as library
 logger = logging.getLogger(__name__)
+
+
+def _check_dependencies():
+    """Check that required dependencies are installed. Called from main()."""
+    if yaml is None:
+        print("Error: PyYAML not installed. Run: pip install pyyaml")
+        sys.exit(1)
+    if requests is None:
+        print("Error: requests not installed. Run: pip install requests")
+        sys.exit(1)
+
+
+def parse_bool(value: Any) -> Optional[bool]:
+    """
+    Parse a boolean value from various representations.
+
+    Graph API often stores booleans as strings ("true"/"false").
+    Returns None if the value cannot be parsed as boolean.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        if value.lower() in ('true', '1', 'yes'):
+            return True
+        if value.lower() in ('false', '0', 'no'):
+            return False
+    if isinstance(value, int):
+        return bool(value)
+    return None
 
 
 class SchemaError(Exception):
@@ -58,8 +87,8 @@ class GraphSchemaLoader:
     def __init__(self, schema_path: Path):
         self.schema_path = schema_path
         self.schema = None
-        self.settings_map: Dict[str, Any] = {}
-        self.missing_settings: Set[str] = set()
+        self.settings_map: dict[str, Any] = {}
+        self.missing_settings: set[str] = set()
 
         self._load_schema()
 
@@ -67,27 +96,69 @@ class GraphSchemaLoader:
         """Load schema from JSON file - raises SchemaError if unavailable"""
         if not self.schema_path.exists():
             raise SchemaError(
-                f"Graph API schema not found: {self.schema_path}\n"
-                f"Run: ./scripts/fetch-graph-schema.sh to generate the schema cache"
+                f"\n"
+                f"{'=' * 70}\n"
+                f"SCHEMA NOT FOUND\n"
+                f"{'=' * 70}\n"
+                f"\n"
+                f"The Graph API schema is required for accurate conversion.\n"
+                f"Expected location: {self.schema_path}\n"
+                f"\n"
+                f"To fetch the schema:\n"
+                f"\n"
+                f"  1. Configure Azure credentials:\n"
+                f"     cp .env.example .env\n"
+                f"     # Edit .env with CLIENT_ID, CLIENT_SECRET, TENANT_ID\n"
+                f"\n"
+                f"  2. Run the schema fetcher:\n"
+                f"     just fetch-schema\n"
+                f"\n"
+                f"See README.md for Azure App Registration setup instructions.\n"
+                f"{'=' * 70}\n"
             )
 
         try:
-            with open(self.schema_path, 'r') as f:
+            with open(self.schema_path) as f:
                 self.schema = json.load(f)
                 self.settings_map = self.schema.get('settings', {})
 
             if not self.settings_map:
                 raise SchemaError(
                     f"Schema file is empty or invalid: {self.schema_path}\n"
-                    f"Re-run: ./scripts/fetch-graph-schema.sh to regenerate"
+                    f"Re-run: just fetch-schema to regenerate"
                 )
+
+            # Check schema age
+            self._check_schema_age()
 
             logger.info(f"Loaded {len(self.settings_map)} setting definitions from schema")
 
         except json.JSONDecodeError as e:
-            raise SchemaError(f"Invalid JSON in schema file: {e}")
+            raise SchemaError(f"Invalid JSON in schema file: {e}") from e
 
-    def get_setting_definition(self, setting_id: str) -> Optional[Dict[str, Any]]:
+    def _check_schema_age(self):
+        """Warn if schema is older than SCHEMA_MAX_AGE_DAYS"""
+        generated_at = self.schema.get('generated_at')
+        if not generated_at:
+            logger.warning("Schema has no generation timestamp - consider refreshing")
+            return
+
+        try:
+            # Parse ISO format timestamp (e.g., "2024-01-15T10:30:00Z")
+            schema_date = datetime.fromisoformat(generated_at.replace('Z', '+00:00'))
+            age_days = (datetime.now(timezone.utc) - schema_date).days
+
+            if age_days > SCHEMA_MAX_AGE_DAYS:
+                logger.warning(
+                    f"Schema is {age_days} days old (generated {generated_at}). "
+                    f"Consider running 'just fetch-schema' to refresh."
+                )
+            else:
+                logger.debug(f"Schema age: {age_days} days (generated {generated_at})")
+        except (ValueError, TypeError) as e:
+            logger.debug(f"Could not parse schema timestamp: {e}")
+
+    def get_setting_definition(self, setting_id: str) -> Optional[dict[str, Any]]:
         """Get setting definition by ID, tracking missing ones"""
         definition = self.settings_map.get(setting_id)
         if definition is None:
@@ -153,9 +224,8 @@ class GraphSchemaLoader:
         Parse baseUri to extract PayloadType and parent dictionary path.
 
         For Microsoft settings (Defender, Edge, Office):
-            baseUri format: PayloadContent/com.microsoft.wdav/Forced/[0]/mcx_preference_settings/antivirusEngine
-                                           ^^^^^^^^^^^^^^^^^^                                    ^^^^^^^^^^^^^^^
-                                           PayloadType                                           Parent dict
+            baseUri format: PayloadContent/com.microsoft.wdav/Forced/[0]/mcx_preference_settings
+            Components: PayloadType (com.microsoft.wdav), Parent dict (antivirusEngine)
 
         For Apple native settings (SoftwareUpdate, FileVault, etc.):
             baseUri is empty, so derive PayloadType from setting ID prefix.
@@ -201,6 +271,17 @@ class GraphSchemaLoader:
                 payload_type = self._normalize_apple_payload_type(domain)
                 return payload_type, None
 
+        # Workaround for Microsoft Graph API bug: some settings are missing
+        # the com.apple. prefix (e.g., loginwindow_* instead of com.apple.loginwindow_*)
+        # Map known malformed setting prefixes to their correct PayloadType
+        malformed_prefix_mappings = {
+            'loginwindow_': 'com.apple.loginwindow',
+            'screensaver_': 'com.apple.screensaver',
+        }
+        for prefix, payload_type in malformed_prefix_mappings.items():
+            if setting_id.startswith(prefix):
+                return payload_type, None
+
         return None, None
 
     def _normalize_apple_payload_type(self, domain: str) -> str:
@@ -227,7 +308,9 @@ class GraphSchemaLoader:
             'com.apple.screensaver': 'com.apple.screensaver',
             'com.apple.systempolicy.control': 'com.apple.systempolicy.control',
             'com.apple.eas.account': 'com.apple.eas.account',
-            'com.apple.configurationprofile.identification': 'com.apple.configurationprofile.identification',
+            'com.apple.configurationprofile.identification': (
+                'com.apple.configurationprofile.identification'
+            ),
         }
 
         if domain in known_mappings:
@@ -256,7 +339,9 @@ class GraphSchemaLoader:
             for setting_id in sorted(self.missing_settings):
                 logger.error(f"  - {setting_id}")
             logger.error("")
-            logger.error("To fix: Re-run ./scripts/fetch-graph-schema.sh to update the schema cache")
+            logger.error(
+                "To fix: Re-run ./scripts/fetch-graph-schema.sh to update the schema cache"
+            )
             logger.error("=" * 70)
             return True
         return False
@@ -276,7 +361,7 @@ class SettingConverter:
 
     def __init__(self, schema_loader: GraphSchemaLoader):
         self.schema_loader = schema_loader
-        self.conversion_errors: List[str] = []
+        self.conversion_errors: list[str] = []
 
     def extract_setting_key(self, setting_id: str) -> Optional[str]:
         """
@@ -297,7 +382,7 @@ class SettingConverter:
         """Get payload_type and parent_dict for a setting"""
         return self.schema_loader.parse_base_uri(setting_id)
 
-    def convert_choice_setting(self, setting: Dict[str, Any]) -> ConvertedSetting:
+    def convert_choice_setting(self, setting: dict[str, Any]) -> ConvertedSetting:
         """Convert a choice setting to plist key-value pair"""
         setting_def_id = setting.get('settingDefinitionId', '')
         choice_value = setting.get('choiceSettingValue', {})
@@ -321,47 +406,52 @@ class SettingConverter:
         )
         return ConvertedSetting(key, None, parent_dict, payload_type)
 
-    def convert_string_setting(self, setting: Dict[str, Any]) -> ConvertedSetting:
+    def convert_string_setting(self, setting: dict[str, Any]) -> ConvertedSetting:
         """Convert a string setting to plist key-value pair"""
         setting_def_id = setting.get('settingDefinitionId', '')
-        string_value = setting.get('simpleSettingValue', {}).get('value', '')
+        simple_value = setting.get('simpleSettingValue', {})
+        string_value = simple_value.get('value')
 
         key = self.extract_setting_key(setting_def_id)
         payload_type, parent_dict = self.get_nesting_info(setting_def_id)
 
-        if key is None:
+        if key is None or string_value is None:
             return ConvertedSetting(None, None, parent_dict, payload_type)
 
         return ConvertedSetting(key, string_value, parent_dict, payload_type)
 
-    def convert_integer_setting(self, setting: Dict[str, Any]) -> ConvertedSetting:
+    def convert_integer_setting(self, setting: dict[str, Any]) -> ConvertedSetting:
         """Convert an integer setting to plist key-value pair"""
         setting_def_id = setting.get('settingDefinitionId', '')
-        int_value = setting.get('simpleSettingValue', {}).get('value', 0)
+        simple_value = setting.get('simpleSettingValue', {})
+        int_value = simple_value.get('value')
 
         key = self.extract_setting_key(setting_def_id)
         payload_type, parent_dict = self.get_nesting_info(setting_def_id)
 
-        if key is None:
+        if key is None or int_value is None:
             return ConvertedSetting(None, None, parent_dict, payload_type)
 
         return ConvertedSetting(key, int(int_value), parent_dict, payload_type)
 
-    def convert_collection_setting(self, setting: Dict[str, Any]) -> ConvertedSetting:
+    def convert_collection_setting(self, setting: dict[str, Any]) -> ConvertedSetting:
         """Convert a collection setting to plist array"""
         setting_def_id = setting.get('settingDefinitionId', '')
-        collection_values = setting.get('simpleSettingCollectionValue', [])
+        collection_values = setting.get('simpleSettingCollectionValue')
 
         key = self.extract_setting_key(setting_def_id)
         payload_type, parent_dict = self.get_nesting_info(setting_def_id)
 
-        if key is None:
+        # Skip if no key or no collection values
+        if key is None or collection_values is None or len(collection_values) == 0:
             return ConvertedSetting(None, None, parent_dict, payload_type)
 
-        values = [item.get('value', '') for item in collection_values]
+        values = [item.get('value') for item in collection_values if item.get('value') is not None]
+        if not values:
+            return ConvertedSetting(None, None, parent_dict, payload_type)
         return ConvertedSetting(key, values, parent_dict, payload_type)
 
-    def convert_group_setting_children(self, setting: Dict[str, Any]) -> Dict[str, Any]:
+    def convert_group_setting_children(self, setting: dict[str, Any]) -> dict[str, Any]:
         """Convert children of a group setting to nested plist dict (no nesting info needed)"""
         children = setting.get('children', [])
         result = {}
@@ -441,7 +531,7 @@ class SettingConverter:
 
         return result
 
-    def _convert_generic_key_value(self, group: Dict[str, Any]) -> Optional[tuple]:
+    def _convert_generic_key_value(self, group: dict[str, Any]) -> Optional[tuple]:
         """
         Convert a generic key-value group to a (key, value) tuple.
 
@@ -478,7 +568,7 @@ class SettingConverter:
             return (key_name, value)
         return None
 
-    def convert_simple_setting(self, setting: Dict[str, Any]) -> ConvertedSetting:
+    def convert_simple_setting(self, setting: dict[str, Any]) -> ConvertedSetting:
         """Convert a simple setting (generic) to plist key-value pair"""
         setting_def_id = setting.get('settingDefinitionId', '')
         simple_value = setting.get('simpleSettingValue', {})
@@ -493,16 +583,27 @@ class SettingConverter:
         value_type = simple_value.get('@odata.type', '')
         raw_value = simple_value.get('value')
 
+        # Skip if value is missing (Not Configured)
+        if raw_value is None:
+            return ConvertedSetting(None, None, parent_dict, payload_type)
+
         if 'StringSettingValue' in value_type:
+            # Check if string is actually a boolean
+            bool_val = parse_bool(raw_value)
+            if bool_val is not None:
+                return ConvertedSetting(key, bool_val, parent_dict, payload_type)
             return ConvertedSetting(key, str(raw_value), parent_dict, payload_type)
         elif 'IntSettingValue' in value_type or 'IntegerSettingValue' in value_type:
             return ConvertedSetting(key, int(raw_value), parent_dict, payload_type)
         elif 'BoolSettingValue' in value_type:
-            return ConvertedSetting(key, bool(raw_value), parent_dict, payload_type)
+            bool_val = parse_bool(raw_value)
+            if bool_val is None:
+                return ConvertedSetting(None, None, parent_dict, payload_type)
+            return ConvertedSetting(key, bool_val, parent_dict, payload_type)
         else:
             return ConvertedSetting(key, raw_value, parent_dict, payload_type)
 
-    def convert_setting_instance(self, setting_instance: Dict[str, Any]) -> ConvertedSetting:
+    def convert_setting_instance(self, setting_instance: dict[str, Any]) -> ConvertedSetting:
         """Convert a setting instance to plist format with nesting info"""
         odata_type = setting_instance.get('@odata.type', '')
 
@@ -620,10 +721,12 @@ class MobileconfigGenerator:
 
     def convert_json_to_mobileconfig(
         self,
-        json_data: Dict[str, Any],
+        json_data: dict[str, Any],
         organization: str = "Talieisin",
-        custom_payload_type: Optional[str] = None
-    ) -> Dict[str, Any]:
+        custom_payload_type: Optional[str] = None,
+        scope: str = "System",
+        removal_disallowed: bool = True
+    ) -> dict[str, Any]:
         """
         Convert OpenIntuneBaseline JSON to mobileconfig plist format.
 
@@ -635,6 +738,8 @@ class MobileconfigGenerator:
             json_data: Parsed JSON from OIB profile
             organization: Organization name for PayloadOrganization
             custom_payload_type: Override automatic PayloadType detection (single payload only)
+            scope: PayloadScope - "System" or "User"
+            removal_disallowed: Whether profile can be removed by user
 
         Returns:
             Dictionary representing mobileconfig plist
@@ -644,7 +749,7 @@ class MobileconfigGenerator:
         description = json_data.get('description', '')
 
         # Convert all settings and collect nesting info
-        converted_settings: List[ConvertedSetting] = []
+        converted_settings: list[ConvertedSetting] = []
 
         for setting_item in settings:
             setting_instance = setting_item.get('settingInstance', {})
@@ -653,7 +758,7 @@ class MobileconfigGenerator:
 
         # Group settings by PayloadType
         # Structure: {payload_type: {"nested": {parent: {key: val}}, "root": {key: val}}}
-        payloads_by_type: Dict[str, Dict[str, Any]] = {}
+        payloads_by_type: dict[str, dict[str, Any]] = {}
 
         for converted in converted_settings:
             if converted.key is None or converted.value is None:
@@ -665,22 +770,32 @@ class MobileconfigGenerator:
             if pt not in payloads_by_type:
                 payloads_by_type[pt] = {"nested": {}, "root": {}}
 
-            # Handle "__flatten__" - Apple wrapper, merge contents to root of this PayloadType
+            # Handle "__flatten__" - Apple wrapper, merge contents to root of PayloadType
             if converted.key == "__flatten__" and isinstance(converted.value, dict):
                 flattened = converted.value.copy()
-                # Remap DisabledPreferencePanes to DisabledSystemSettings for macOS 13+ values
+                # Remap DisabledPreferencePanes to DisabledSystemSettings for macOS 13+
                 if 'DisabledPreferencePanes' in flattened:
                     values = flattened['DisabledPreferencePanes']
-                    if isinstance(values, list) and any('.extension' in str(v) or 'SettingsExtension' in str(v) for v in values):
-                        logger.info("Remapping DisabledPreferencePanes to DisabledSystemSettings (macOS 13+ values detected)")
-                        flattened['DisabledSystemSettings'] = flattened.pop('DisabledPreferencePanes')
+                    is_macos13 = isinstance(values, list) and any(
+                        '.extension' in str(v) or 'SettingsExtension' in str(v)
+                        for v in values
+                    )
+                    if is_macos13:
+                        logger.info(
+                            "Remapping DisabledPreferencePanes to DisabledSystemSettings "
+                            "(macOS 13+ values detected)"
+                        )
+                        flattened['DisabledSystemSettings'] = flattened.pop(
+                            'DisabledPreferencePanes'
+                        )
                 payloads_by_type[pt]["root"].update(flattened)
                 logger.debug(f"Flattened Apple wrapper with {len(flattened)} settings to {pt}")
             elif converted.parent_dict:
                 # Microsoft nested setting (antivirusEngine, cloudService, etc.)
                 if converted.parent_dict not in payloads_by_type[pt]["nested"]:
                     payloads_by_type[pt]["nested"][converted.parent_dict] = {}
-                payloads_by_type[pt]["nested"][converted.parent_dict][converted.key] = converted.value
+                nested_dict = payloads_by_type[pt]["nested"][converted.parent_dict]
+                nested_dict[converted.key] = converted.value
                 logger.debug(f"Nested {converted.key} under {converted.parent_dict} in {pt}")
             else:
                 # Root-level setting
@@ -700,12 +815,13 @@ class MobileconfigGenerator:
         inner_payloads = []
         for payload_type, content in payloads_by_type.items():
             if payload_type == "UNKNOWN_PAYLOAD_TYPE":
-                logger.warning(f"Settings with unknown PayloadType will be skipped")
+                logger.warning("Settings with unknown PayloadType will be skipped")
                 continue
 
             # Skip unsupported payload types that can't work standalone
             if payload_type in UNSUPPORTED_PAYLOAD_TYPES:
-                logger.warning(f"Skipping {payload_type}: {UNSUPPORTED_PAYLOAD_TYPES[payload_type]}")
+                reason = UNSUPPORTED_PAYLOAD_TYPES[payload_type]
+                logger.warning(f"Skipping {payload_type}: {reason}")
                 continue
 
             # Skip if no actual content
@@ -726,13 +842,19 @@ class MobileconfigGenerator:
             # Add nested dictionaries (Microsoft settings like antivirusEngine)
             for parent_dict, child_settings in content["nested"].items():
                 inner_payload[parent_dict] = child_settings
-                logger.debug(f"Added {parent_dict} with {len(child_settings)} settings to {payload_type}")
+                logger.debug(
+                    f"Added {parent_dict} with {len(child_settings)} settings to {payload_type}"
+                )
 
             # Add root-level settings (Apple flattened or direct settings)
             inner_payload.update(content["root"])
 
             inner_payloads.append(inner_payload)
-            logger.info(f"Created payload for {payload_type} with {len(content['root'])} root + {len(content['nested'])} nested groups")
+            root_count = len(content['root'])
+            nested_count = len(content['nested'])
+            logger.info(
+                f"Created payload for {payload_type} with {root_count} root + {nested_count} nested"
+            )
 
         if not inner_payloads:
             logger.error("No valid payloads generated!")
@@ -755,14 +877,14 @@ class MobileconfigGenerator:
             'PayloadDisplayName': name,
             'PayloadDescription': description,
             'PayloadOrganization': organization,
-            'PayloadScope': 'System',
-            'PayloadRemovalDisallowed': True,
+            'PayloadScope': scope,
+            'PayloadRemovalDisallowed': removal_disallowed,
             'PayloadContent': inner_payloads
         }
 
         return mobileconfig
 
-    def write_mobileconfig(self, mobileconfig: Dict[str, Any], output_path: Path):
+    def write_mobileconfig(self, mobileconfig: dict[str, Any], output_path: Path):
         """Write mobileconfig dictionary to XML plist file"""
         try:
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -777,15 +899,31 @@ class MobileconfigGenerator:
 class BatchConverter:
     """Handles batch conversion using a mapping file"""
 
-    def __init__(self, mapping_path: Path, output_root: Path):
+    def __init__(
+        self,
+        mapping_path: Path,
+        output_root: Path,
+        organization_override: Optional[str] = None
+    ):
         self.mapping_path = mapping_path
         self.output_root = output_root
         self.mapping = self.load_mapping()
+        self.organization_override = organization_override
 
-    def load_mapping(self) -> Dict[str, Any]:
+        # Load config from mapping.yaml
+        config = self.mapping.get('config', {})
+        self.organization = (
+            organization_override or
+            config.get('organization') or
+            'Talieisin'
+        )
+        self.default_scope = config.get('default_scope', 'System')
+        self.removal_disallowed = config.get('removal_disallowed', True)
+
+    def load_mapping(self) -> dict[str, Any]:
         """Load YAML mapping file"""
         try:
-            with open(self.mapping_path, 'r') as f:
+            with open(self.mapping_path) as f:
                 return yaml.safe_load(f)
         except Exception as e:
             logger.error(f"Failed to load mapping file: {e}")
@@ -864,7 +1002,7 @@ class BatchConverter:
 
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 404:
-                raise Exception(f"Profile not found on OIB GitHub: {oib_name}")
+                raise Exception(f"Profile not found on OIB GitHub: {oib_name}") from e
             raise
         except Exception as e:
             logger.error(f"Failed to download {oib_name}: {e}")
@@ -873,7 +1011,10 @@ class BatchConverter:
         logger.info(f"Converting: {oib_name}")
         mobileconfig = generator.convert_json_to_mobileconfig(
             json_data,
-            custom_payload_type=custom_payload_type
+            organization=self.organization,
+            custom_payload_type=custom_payload_type,
+            scope=self.default_scope,
+            removal_disallowed=self.removal_disallowed
         )
 
         # Resolve output path relative to output root
@@ -950,8 +1091,14 @@ def main():
 
     args = parser.parse_args()
 
-    if args.verbose:
-        logger.setLevel(logging.DEBUG)
+    # Configure logging (only in main, not on import)
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+
+    # Check dependencies
+    _check_dependencies()
 
     # Load Graph API schema - REQUIRED
     try:
@@ -972,7 +1119,9 @@ def main():
             logger.error(f"Mapping file not found: {args.mapping}")
             sys.exit(1)
 
-        batch = BatchConverter(args.mapping, args.output_dir)
+        # Pass CLI organisation if explicitly provided (not default)
+        org_override = args.organisation if args.organisation != 'Talieisin' else None
+        batch = BatchConverter(args.mapping, args.output_dir, org_override)
         success, fail = batch.convert_all(converter, generator)
 
         if fail > 0:
@@ -986,7 +1135,7 @@ def main():
 
         logger.info(f"Converting: {args.profile}")
 
-        with open(args.profile, 'r') as f:
+        with open(args.profile) as f:
             # Handle UTF-8 BOM
             content = f.read()
             if content.startswith('\ufeff'):

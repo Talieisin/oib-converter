@@ -92,14 +92,14 @@ log_info "Tenant ID: $TENANT_ID"
 VENV_PYTHON="${REPO_ROOT}/.venv/bin/python3"
 if [[ ! -f "$VENV_PYTHON" ]]; then
     log_error "Python virtual environment not found"
-    log_error "Create it with: make setup"
+    log_error "Create it with: just sync"
     log_error "Or manually: python3 -m venv .venv && .venv/bin/pip install pyyaml requests msal"
     exit 1
 fi
 
 # Check for msal
 if ! "$VENV_PYTHON" -c "import msal" 2>/dev/null; then
-    log_error "MSAL not installed. Run: make setup"
+    log_error "MSAL not installed. Run: just sync"
     log_error "Or manually: .venv/bin/pip install msal"
     exit 1
 fi
@@ -107,7 +107,10 @@ fi
 # Authenticate with Microsoft Graph API
 log_info "Authenticating with Microsoft Graph API..."
 
-TOKEN_RESPONSE=$("$VENV_PYTHON" <<EOF
+# Pass credentials via environment variables to avoid shell injection
+TOKEN_RESPONSE=$(CLIENT_ID="$CLIENT_ID" CLIENT_SECRET="$CLIENT_SECRET" TENANT_ID="$TENANT_ID" \
+    "$VENV_PYTHON" <<'EOF'
+import os
 import sys
 import json
 try:
@@ -116,9 +119,9 @@ except ImportError:
     print(json.dumps({"error": "msal not installed"}))
     sys.exit(1)
 
-client_id = "$CLIENT_ID"
-client_secret = "$CLIENT_SECRET"
-tenant_id = "$TENANT_ID"
+client_id = os.environ.get("CLIENT_ID", "")
+client_secret = os.environ.get("CLIENT_SECRET", "")
+tenant_id = os.environ.get("TENANT_ID", "")
 authority = f"https://login.microsoftonline.com/{tenant_id}"
 scopes = ["https://graph.microsoft.com/.default"]
 
@@ -163,13 +166,17 @@ GRAPH_URL="https://graph.microsoft.com/beta/deviceManagement/configurationSettin
 # Fetch with pagination support
 GENERATED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-"$VENV_PYTHON" > "$OUTPUT_FILE" <<EOF
+# Pass access token and metadata via environment variables to avoid shell injection
+if ! ACCESS_TOKEN="$ACCESS_TOKEN" GRAPH_URL="$GRAPH_URL" GENERATED_AT="$GENERATED_AT" \
+    "$VENV_PYTHON" > "$OUTPUT_FILE" <<'EOF'
+import os
 import sys
 import json
 import requests
 
-access_token = "$ACCESS_TOKEN"
-url = "$GRAPH_URL"
+access_token = os.environ.get("ACCESS_TOKEN", "")
+url = os.environ.get("GRAPH_URL", "")
+generated_at = os.environ.get("GENERATED_AT", "")
 headers = {
     "Authorization": f"Bearer {access_token}",
     "Accept": "application/json"
@@ -198,24 +205,34 @@ while url:
 
     print(f"  Retrieved {len(settings)} settings (total: {len(all_settings)})", file=sys.stderr)
 
-# Filter to macOS settings only (reduce file size)
-macos_settings = [s for s in all_settings if "apple" in s.get("id", "").lower() or "mac" in s.get("id", "").lower()]
+# Filter to macOS-relevant settings (Apple native + Microsoft apps for macOS)
+# Include: apple, mac, microsoft (wdav/defender, edge, office, onedrive, teams)
+# Also include: loginwindow, screensaver (some settings lack com.apple. prefix)
+def is_macos_relevant(setting_id):
+    sid = setting_id.lower()
+    return any(kw in sid for kw in [
+        "apple", "mac",  # Apple native settings
+        "microsoft", "wdav", "defender",  # Microsoft Defender
+        "edge", "office", "onedrive", "teams",  # Microsoft apps
+        "loginwindow", "screensaver",  # Settings sometimes missing com.apple. prefix
+    ])
+
+macos_settings = [s for s in all_settings if is_macos_relevant(s.get("id", ""))]
 
 print(f"\nTotal settings: {len(all_settings)}", file=sys.stderr)
-print(f"macOS settings: {len(macos_settings)}", file=sys.stderr)
+print(f"macOS-relevant settings: {len(macos_settings)}", file=sys.stderr)
 
 # Create schema structure
 schema = {
     "version": "1.0",
-    "generated_at": "$GENERATED_AT",
+    "generated_at": generated_at,
     "total_settings": len(macos_settings),
     "settings": {s["id"]: s for s in macos_settings}
 }
 
 print(json.dumps(schema, indent=2))
 EOF
-
-if [[ $? -ne 0 ]]; then
+then
     log_error "Failed to fetch setting definitions"
     exit 1
 fi

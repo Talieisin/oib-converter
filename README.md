@@ -14,20 +14,24 @@ Convert [OpenIntuneBaseline](https://github.com/SkipToTheEndpoint/OpenIntuneBase
 ## Quick Start
 
 ```bash
-# 1. Clone and setup
+# 1. Install uv and just
+curl -LsSf https://astral.sh/uv/install.sh | sh
+brew install just  # or: cargo install just
+
+# 2. Clone and sync dependencies
 git clone https://github.com/Talieisin/oib-converter.git
 cd oib-converter
-make setup
+just sync
 
-# 2. Configure Azure credentials
+# 3. Configure Azure credentials
 cp .env.example .env
 # Edit .env with your credentials (see below)
 
-# 3. Fetch Graph API schema
-make fetch-schema
+# 4. Fetch Graph API schema
+just fetch-schema
 
-# 4. Convert all profiles
-make convert
+# 5. Convert all profiles
+just convert
 ```
 
 ## Azure Credential Setup
@@ -77,9 +81,9 @@ export TENANT_ID=your-tenant-id
 Convert all profiles defined in `mapping.yaml`:
 
 ```bash
-make convert
+just convert
 # Or directly:
-oib-converter --batch --verbose
+uv run oib-converter --batch --verbose
 ```
 
 Output is written to `output/` directory:
@@ -100,7 +104,7 @@ output/
 ### Single File Conversion
 
 ```bash
-oib-converter --profile path/to/oib-profile.json --output profile.mobileconfig
+uv run oib-converter --profile path/to/oib-profile.json --output profile.mobileconfig
 ```
 
 ### CLI Options
@@ -141,7 +145,7 @@ The Graph API schema should be refreshed quarterly or when:
 - Conversion errors indicate missing settings
 
 ```bash
-make fetch-schema
+just fetch-schema
 ```
 
 ## Supported Profiles
@@ -149,9 +153,9 @@ make fetch-schema
 | Category | Profiles |
 |----------|----------|
 | **Microsoft Defender** | Antivirus Config, MDE Config |
-| **System Security** | Restrictions, Accounts/Login, FileVault, Gatekeeper |
-| **Software Updates** | Update Configuration |
-| **Microsoft 365** | Office, Edge (6 profiles), AutoUpdate, OneDrive |
+| **System Security** | Device Restrictions, Accounts/Login, FileVault, Gatekeeper, Software Updates |
+| **Microsoft Edge** | Security, Extensions, Password Management, Profiles/Sign-in/Sync, Updates |
+| **Microsoft 365** | Office Config, MAU (AutoUpdate), OneDrive (KFM, Service Access) |
 | **Authentication** | Platform SSO |
 
 ## Validation
@@ -159,11 +163,11 @@ make fetch-schema
 After conversion, validate the output with:
 
 ```bash
-# macOS built-in validator
+# macOS built-in plist syntax validator
 plutil -lint output/**/*.mobileconfig
 
-# Or use mobileconfig-validator (separate tool)
-pip install mobileconfig-validator
+# For deeper validation (payload structure, required keys, value types)
+# https://github.com/Talieisin/mobileconfig-validator
 mobileconfig-validator output/**/*.mobileconfig
 ```
 
@@ -171,7 +175,39 @@ mobileconfig-validator output/**/*.mobileconfig
 
 - **FileVault Recovery Key Escrow**: Requires Intune-injected certificates, cannot be converted to standalone mobileconfig
 - **Platform SSO**: Full functionality requires Intune deployment
-- **Unknown Settings**: Settings not in Graph API schema are skipped with warnings
+
+## Known Issues
+
+### Inconsistent Setting IDs in Microsoft Graph API
+
+Some macOS `settingDefinitionId` values in the Intune Settings Catalogue are missing the `com.apple.` prefix (e.g., `loginwindow_loginwindow` instead of `com.apple.loginwindow_loginwindow`). This is a bug in the Microsoft Graph API, not this tool.
+
+We work around this by:
+1. Including additional keywords in our schema filter (`loginwindow`, `screensaver`)
+2. Mapping malformed setting prefixes to their correct PayloadType in the converter
+
+If you encounter "Unknown setting" warnings for settings that should exist, please open an issue.
+
+Bug reported to Microsoft Intune support (December 2025).
+
+## Development
+
+This project uses [uv](https://docs.astral.sh/uv/) for dependency management and [just](https://github.com/casey/just) for task running.
+
+```bash
+# List available commands
+just
+
+# Install dependencies
+just sync
+
+# Available commands
+just fetch-schema    # Fetch Graph API schema (requires Azure credentials)
+just fetch-profiles  # Fetch OIB profiles from GitHub
+just convert         # Convert all profiles using mapping.yaml
+just lint            # Run linters (ruff, shellcheck)
+just clean           # Remove generated files and caches
+```
 
 ## Contributing
 

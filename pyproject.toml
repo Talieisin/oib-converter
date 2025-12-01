@@ -7,7 +7,7 @@ name = "oib-converter"
 version = "1.0.0"
 description = "Convert OpenIntuneBaseline JSON profiles to Apple mobileconfig format"
 readme = "README.md"
-license = "MIT"
+license = { file = "LICENSE" }
 requires-python = ">=3.9"
 authors = [
     { name = "Talieisin", email = "it@talieisin.com" }
@@ -49,6 +49,13 @@ dev = [
     "mypy>=1.0",
 ]
 
+[dependency-groups]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0",
+]
+
 [project.scripts]
 oib-converter = "oib_converter.converter:main"
 
@@ -64,9 +71,15 @@ packages = ["src/oib_converter"]
 [tool.ruff]
 target-version = "py39"
 line-length = 100
+
+[tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "C4"]
 
 [tool.mypy]
 python_version = "3.9"
 warn_return_any = true
 warn_unused_ignores = true
+
+# uv configuration
+[tool.uv]
+default-groups = ["dev"]
