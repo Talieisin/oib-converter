@@ -136,6 +136,7 @@ config:
   organisation: "Talieisin"
   default_scope: "System"
   removal_disallowed: true
+  default_output_dir: "/path/to/output"  # Optional: override default output directory
 ```
 
 ## Schema Refresh

@@ -3,7 +3,7 @@
 """
 OpenIntuneBaseline to mobileconfig Converter
 
-Converts Microsoft Intune Settings Catalog JSON profiles (from OpenIntuneBaseline)
+Converts Microsoft Intune Settings Catalogue JSON profiles (from OpenIntuneBaseline)
 to Apple Configuration Profile (mobileconfig) format.
 
 REQUIRES: Microsoft Graph API schema cache for accurate conversion.
@@ -286,7 +286,7 @@ class GraphSchemaLoader:
 
     def _normalize_apple_payload_type(self, domain: str) -> str:
         """
-        Normalize Apple domain to proper PayloadType format.
+        Normalise Apple domain to proper PayloadType format.
 
         Known mappings (Apple's actual PayloadType identifiers):
         - com.apple.softwareupdate -> com.apple.SoftwareUpdate
@@ -736,7 +736,7 @@ class MobileconfigGenerator:
 
         Args:
             json_data: Parsed JSON from OIB profile
-            organization: Organization name for PayloadOrganization
+            organisation: Organisation name for PayloadOrganization
             custom_payload_type: Override automatic PayloadType detection (single payload only)
             scope: PayloadScope - "System" or "User"
             removal_disallowed: Whether profile can be removed by user
@@ -1059,8 +1059,8 @@ def main():
     parser.add_argument(
         '--output-dir',
         type=Path,
-        default=repo_root / 'output',
-        help='Output directory for batch conversion (default: output/)'
+        default=None,
+        help='Output directory for batch conversion (default: from mapping.yaml or output/)'
     )
 
     parser.add_argument(
@@ -1119,9 +1119,22 @@ def main():
             logger.error(f"Mapping file not found: {args.mapping}")
             sys.exit(1)
 
+        # Resolve output directory: CLI arg > mapping.yaml config > default
+        output_dir = args.output_dir
+        if output_dir is None:
+            # Load mapping to check for default_output_dir config
+            with open(args.mapping) as f:
+                mapping_config = yaml.safe_load(f).get('config', {})
+            config_output_dir = mapping_config.get('default_output_dir')
+            if config_output_dir:
+                output_dir = Path(config_output_dir)
+                logger.info(f"Using output directory from mapping.yaml: {output_dir}")
+            else:
+                output_dir = repo_root / 'output'
+
         # Pass CLI organisation if explicitly provided (not default)
         org_override = args.organisation if args.organisation != 'Talieisin' else None
-        batch = BatchConverter(args.mapping, args.output_dir, org_override)
+        batch = BatchConverter(args.mapping, output_dir, org_override)
         success, fail = batch.convert_all(converter, generator)
 
         if fail > 0:
