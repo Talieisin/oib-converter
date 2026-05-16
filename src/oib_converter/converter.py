@@ -903,12 +903,14 @@ class BatchConverter:
         self,
         mapping_path: Path,
         output_root: Path,
-        organization_override: Optional[str] = None
+        organization_override: Optional[str] = None,
+        source_path: Optional[Path] = None,
     ):
         self.mapping_path = mapping_path
         self.output_root = output_root
         self.mapping = self.load_mapping()
         self.organization_override = organization_override
+        self.source_path = source_path
 
         # Load config from mapping.yaml
         config = self.mapping.get('config', {})
@@ -974,6 +976,50 @@ class BatchConverter:
         logger.info(f"Batch conversion complete: {success_count} succeeded, {fail_count} failed")
         return success_count, fail_count
 
+    GITHUB_BASE_URL = (
+        "https://raw.githubusercontent.com/SkipToTheEndpoint/"
+        "OpenIntuneBaseline/main/MACOS/NativeImport"
+    )
+
+    @staticmethod
+    def _strip_utf8_bom(content: bytes) -> bytes:
+        """Strip a leading UTF-8 BOM if present."""
+        if content.startswith(b'\xef\xbb\xbf'):
+            return content[3:]
+        return content
+
+    def _load_profile_from_path(self, oib_name: str) -> dict[str, Any]:
+        """Read an OIB profile JSON from a local source-path directory."""
+        json_file = self.source_path / f"{oib_name}.json"
+        logger.info(f"Reading local: {json_file}")
+
+        if not json_file.is_file():
+            raise FileNotFoundError(
+                f"Profile not found in local source path: {json_file}"
+            )
+
+        content = self._strip_utf8_bom(json_file.read_bytes())
+        return json.loads(content.decode('utf-8'))
+
+    def _load_profile_from_github(self, oib_name: str) -> dict[str, Any]:
+        """Download an OIB profile JSON from the upstream GitHub raw URL."""
+        json_url = f"{self.GITHUB_BASE_URL}/{oib_name}.json"
+        logger.info(f"Downloading: {oib_name}")
+
+        try:
+            response = requests.get(json_url, timeout=30)
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                raise Exception(f"Profile not found on OIB GitHub: {oib_name}") from e
+            raise
+        except Exception as e:
+            logger.error(f"Failed to download {oib_name}: {e}")
+            raise
+
+        content = self._strip_utf8_bom(response.content)
+        return json.loads(content.decode('utf-8'))
+
     def convert_profile(
         self,
         oib_name: str,
@@ -983,30 +1029,10 @@ class BatchConverter:
         custom_payload_type: Optional[str] = None
     ):
         """Convert a single profile from OIB to mobileconfig"""
-        # Construct OIB JSON URL
-        base_url = "https://raw.githubusercontent.com/SkipToTheEndpoint/OpenIntuneBaseline/main/MACOS/NativeImport"
-        json_url = f"{base_url}/{oib_name}.json"
-
-        logger.info(f"Downloading: {oib_name}")
-
-        try:
-            response = requests.get(json_url, timeout=30)
-            response.raise_for_status()
-
-            # Handle UTF-8 BOM
-            content = response.content
-            if content.startswith(b'\xef\xbb\xbf'):
-                content = content[3:]
-
-            json_data = json.loads(content.decode('utf-8'))
-
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 404:
-                raise Exception(f"Profile not found on OIB GitHub: {oib_name}") from e
-            raise
-        except Exception as e:
-            logger.error(f"Failed to download {oib_name}: {e}")
-            raise
+        if self.source_path is not None:
+            json_data = self._load_profile_from_path(oib_name)
+        else:
+            json_data = self._load_profile_from_github(oib_name)
 
         logger.info(f"Converting: {oib_name}")
         mobileconfig = generator.convert_json_to_mobileconfig(
@@ -1084,6 +1110,21 @@ def main():
     )
 
     parser.add_argument(
+        '--source-path',
+        type=Path,
+        default=None,
+        help=(
+            'Directory containing OIB JSON profiles to use in batch mode. '
+            'When set, the converter reads profiles from this local path '
+            'instead of downloading them from the OIB GitHub repository. '
+            'Useful for pinning to a specific upstream commit via a local '
+            'checkout (e.g. a sparse-clone) and for offline / air-gapped '
+            'builds. The directory must contain files named '
+            '"<oib_name>.json" matching the mapping.yaml entries.'
+        )
+    )
+
+    parser.add_argument(
         '--verbose',
         action='store_true',
         help='Enable verbose logging'
@@ -1134,7 +1175,18 @@ def main():
 
         # Pass CLI organisation if explicitly provided (not default)
         org_override = args.organisation if args.organisation != 'Talieisin' else None
-        batch = BatchConverter(args.mapping, output_dir, org_override)
+
+        # Validate --source-path early so we fail before the first download attempt
+        if args.source_path is not None and not args.source_path.is_dir():
+            logger.error(f"--source-path is not a directory: {args.source_path}")
+            sys.exit(1)
+
+        batch = BatchConverter(
+            args.mapping,
+            output_dir,
+            org_override,
+            source_path=args.source_path,
+        )
         success, fail = batch.convert_all(converter, generator)
 
         if fail > 0:
