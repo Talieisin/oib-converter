@@ -115,6 +115,14 @@ uv run oib-converter --profile path/to/oib-profile.json --output profile.mobilec
 --batch             Run batch conversion using mapping file
 --mapping PATH      Path to mapping YAML (default: mapping.yaml)
 --output-dir PATH   Output directory for batch (default: output/)
+--source-path PATH  Local directory to read OIB JSON profiles from in
+                    batch mode instead of downloading from GitHub.
+                    Accepts either (a) the root of an OpenIntuneBaseline
+                    checkout (the converter auto-detects
+                    MACOS/NativeImport) or (b) a directory containing
+                    the "<oib_name>.json" files directly. Useful for
+                    pinning to a specific upstream commit or for
+                    offline / air-gapped builds.
 --schema PATH       Path to Graph schema (default: cache/graph-schema.json)
 --organisation NAME Organisation name (default: Talieisin)
 --payload-type TYPE Override PayloadType detection
