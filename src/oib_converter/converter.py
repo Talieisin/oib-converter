@@ -910,7 +910,7 @@ class BatchConverter:
         self.output_root = output_root
         self.mapping = self.load_mapping()
         self.organization_override = organization_override
-        self.source_path = source_path
+        self.source_path = self._resolve_source_path(source_path)
 
         # Load config from mapping.yaml
         config = self.mapping.get('config', {})
@@ -981,12 +981,45 @@ class BatchConverter:
         "OpenIntuneBaseline/main/MACOS/NativeImport"
     )
 
+    # The subdirectory inside an OpenIntuneBaseline checkout that mirrors
+    # GITHUB_BASE_URL. If --source-path points at a checkout root that
+    # contains this layout, we silently descend into it so callers don't
+    # have to know about the internal repo structure.
+    OIB_NATIVE_IMPORT_SUBDIR = ("MACOS", "NativeImport")
+
     @staticmethod
     def _strip_utf8_bom(content: bytes) -> bytes:
         """Strip a leading UTF-8 BOM if present."""
         if content.startswith(b'\xef\xbb\xbf'):
             return content[3:]
         return content
+
+    @classmethod
+    def _resolve_source_path(cls, raw_path: Optional[Path]) -> Optional[Path]:
+        """Resolve a --source-path value to the directory that actually
+        holds the OIB JSON files.
+
+        If ``raw_path`` is the root of an OpenIntuneBaseline checkout
+        (i.e. contains ``MACOS/NativeImport/``), descend into that
+        subdirectory automatically — this matches what the converter
+        downloads from GitHub raw and avoids a footgun where callers
+        point at the checkout root and every profile load fails with
+        FileNotFoundError. Otherwise the caller is assumed to have
+        pointed at a directory containing the JSONs directly, and we
+        use it unchanged.
+        """
+        if raw_path is None:
+            return None
+
+        nested = raw_path.joinpath(*cls.OIB_NATIVE_IMPORT_SUBDIR)
+        if nested.is_dir():
+            logger.info(
+                f"--source-path: descending into OIB layout subdirectory: {nested}"
+            )
+            return nested
+
+        logger.info(f"--source-path: using directory directly: {raw_path}")
+        return raw_path
 
     def _load_profile_from_path(self, oib_name: str) -> dict[str, Any]:
         """Read an OIB profile JSON from a local source-path directory."""
@@ -1114,13 +1147,14 @@ def main():
         type=Path,
         default=None,
         help=(
-            'Directory containing OIB JSON profiles to use in batch mode. '
-            'When set, the converter reads profiles from this local path '
-            'instead of downloading them from the OIB GitHub repository. '
-            'Useful for pinning to a specific upstream commit via a local '
-            'checkout (e.g. a sparse-clone) and for offline / air-gapped '
-            'builds. The directory must contain files named '
-            '"<oib_name>.json" matching the mapping.yaml entries.'
+            'Local directory to read OIB JSON profiles from in batch mode '
+            'instead of downloading from the OIB GitHub repository. '
+            'Accepts either: (a) the root of an OpenIntuneBaseline '
+            'checkout — the converter auto-detects the '
+            'MACOS/NativeImport subdirectory; or (b) a directory '
+            'containing the "<oib_name>.json" files directly. Useful '
+            'for pinning to a specific upstream commit via a local '
+            'sparse-clone and for offline / air-gapped builds.'
         )
     )
 
