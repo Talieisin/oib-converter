@@ -45,14 +45,14 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
-    "ruff>=0.15.22",
+    "ruff>=0.16.0",
     "mypy>=1.19.1",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=7.0",
-    "ruff>=0.15.22",
+    "ruff>=0.16.0",
     "mypy>=1.19.1",
 ]
 
