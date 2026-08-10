@@ -55,6 +55,26 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+# Mask an identifier for logging: keep the leading 8 characters (a GUID's first
+# block, enough to tell tenants and app registrations apart at a glance) and
+# elide the rest. This repo is public and these values live in the encrypted
+# store, so a full identifier should never reach stdout or a CI log.
+mask_id() {
+    local value="$1"
+    if [[ ${#value} -le 8 ]]; then
+        printf '%s' '********'
+    else
+        printf '%s...' "${value:0:8}"
+    fi
+}
+
+# Redact GUID-shaped substrings from arbitrary text. Entra error descriptions
+# routinely echo the client or tenant ID back (e.g. AADSTS700016), which would
+# otherwise defeat mask_id.
+redact_guids() {
+    sed -E 's/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/<redacted-guid>/g'
+}
+
 # Check for required tools
 command -v python3 >/dev/null 2>&1 || { log_error "python3 is required but not installed"; exit 1; }
 command -v jq >/dev/null 2>&1 || { log_error "jq is required but not installed. Install with: brew install jq"; exit 1; }
@@ -117,8 +137,8 @@ if [[ -z "${CLIENT_ID:-}" ]] || [[ -z "${CLIENT_SECRET:-}" ]] || [[ -z "${TENANT
 fi
 
 log_info "Credentials loaded successfully"
-log_info "Client ID: $CLIENT_ID"
-log_info "Tenant ID: $TENANT_ID"
+log_info "Client ID: $(mask_id "$CLIENT_ID")"
+log_info "Tenant ID: $(mask_id "$TENANT_ID")"
 
 # Check for Python virtual environment
 VENV_PYTHON="${REPO_ROOT}/.venv/bin/python3"
@@ -174,7 +194,7 @@ EOF
 
 # Check for authentication errors
 if echo "$TOKEN_RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
-    ERROR_MSG=$(echo "$TOKEN_RESPONSE" | jq -r '.error_description // .error')
+    ERROR_MSG=$(echo "$TOKEN_RESPONSE" | jq -r '.error_description // .error' | redact_guids)
     log_error "Authentication failed: $ERROR_MSG"
     exit 1
 fi
@@ -183,7 +203,14 @@ ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.access_token')
 
 if [[ -z "$ACCESS_TOKEN" ]] || [[ "$ACCESS_TOKEN" == "null" ]]; then
     log_error "Failed to obtain access token"
-    log_error "Response: $TOKEN_RESPONSE"
+    # Strip any token material before echoing the response, then redact GUIDs.
+    # If it will not parse as JSON it is not a token response, so say nothing
+    # about its contents rather than dumping an unknown blob.
+    if SAFE_RESPONSE=$(printf '%s' "$TOKEN_RESPONSE" | jq -c 'del(.access_token, .id_token, .refresh_token)' 2>/dev/null); then
+        log_error "Response: $(printf '%s' "$SAFE_RESPONSE" | redact_guids)"
+    else
+        log_error "Response was not valid JSON; omitted to avoid logging credential material."
+    fi
     exit 1
 fi
 
