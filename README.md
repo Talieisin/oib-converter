@@ -16,7 +16,7 @@ Convert [OpenIntuneBaseline](https://github.com/SkipToTheEndpoint/OpenIntuneBase
 ```bash
 # 1. Install the toolchain (Homebrew-owned; mise supplies Python)
 curl -LsSf https://astral.sh/uv/install.sh | sh
-brew install just jq mise direnv  # shellcheck too, if you plan to run `just lint`
+brew install just jq mise direnv shellcheck  # shellcheck is needed by `just lint`
 
 # 2. Clone
 git clone https://github.com/Talieisin/oib-converter.git

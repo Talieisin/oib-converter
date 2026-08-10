@@ -62,13 +62,35 @@ command -v jq >/dev/null 2>&1 || { log_error "jq is required but not installed. 
 # Create cache directory
 mkdir -p "${REPO_ROOT}/cache"
 
-# Load credentials from .env file if it exists
+# Load credentials from a tree-local .env if one exists.
+#
+# .env is strictly a FALLBACK: anything already exported (by direnv from
+# ~/.config/env/oib-converter.env, or by hand) wins. Sourcing alone would do the
+# opposite and let a stale tree-local file silently override the intended
+# credentials, so pre-existing values are captured first and restored after.
 if [[ -f "$ENV_FILE" ]]; then
-    log_info "Loading credentials from .env file..."
+    log_info "Loading credentials from .env file (exported environment takes precedence)..."
+    exported_client_id="${CLIENT_ID:-}"
+    exported_client_secret="${CLIENT_SECRET:-}"
+    exported_tenant_id="${TENANT_ID:-}"
+
     set -a
     # shellcheck disable=SC1090
     source "$ENV_FILE"
     set +a
+
+    # Restore whatever the environment already provided. Plain `if` blocks, not
+    # `[[ ... ]] && x=y`, so a false test cannot trip `set -e`.
+    if [[ -n "$exported_client_id" ]]; then
+        CLIENT_ID="$exported_client_id"
+    fi
+    if [[ -n "$exported_client_secret" ]]; then
+        CLIENT_SECRET="$exported_client_secret"
+    fi
+    if [[ -n "$exported_tenant_id" ]]; then
+        TENANT_ID="$exported_tenant_id"
+    fi
+    unset exported_client_id exported_client_secret exported_tenant_id
 fi
 
 # Validate credentials
