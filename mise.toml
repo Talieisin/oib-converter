@@ -1,0 +1,13 @@
+# Runtime pinning for oib-converter.
+#
+# Python only. uv, just, jq and shellcheck stay Homebrew-owned — mise is not
+# the package manager for this project, just the runtime pin.
+#
+# No [env] section: every variable this project reads is a credential, so it
+# belongs in the encrypted store loaded by .envrc, never in a committed file.
+# This repo is public.
+
+[tools]
+# Matches the highest Python version exercised by CI
+# (.github/workflows/ci.yml tests 3.9-3.12; pyproject requires >= 3.9).
+python = "3.12"

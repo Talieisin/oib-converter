@@ -7,16 +7,20 @@
 ## Downloads setting definitions from Microsoft Graph API and caches them locally.
 ## This cache is used by the OIB converter to resolve enumeration values accurately.
 ##
-## Credentials are loaded from .env file or environment variables.
+## Credentials are read from the environment, with a tree-local .env fallback.
 ##
 ## Usage:
-##   1. With .env file:
-##      cp .env.example .env
-##      # Edit .env with your credentials
+##   1. Preferred — encrypted store + direnv (nothing lands in the repo):
+##      chezmoi edit ~/.config/env/oib-converter.env
+##      direnv allow          # .envrc loads the store on cd
 ##      ./scripts/fetch-graph-schema.sh
 ##
 ##   2. With environment variables:
 ##      CLIENT_ID=xxx CLIENT_SECRET=xxx TENANT_ID=xxx ./scripts/fetch-graph-schema.sh
+##
+##   3. Fallback — tree-local .env file (git-ignored):
+##      cp .env.example .env
+##      # Edit .env with your credentials
 ##
 ## Output: cache/graph-schema.json
 ##
@@ -32,11 +36,11 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 OUTPUT_FILE="${REPO_ROOT}/cache/graph-schema.json"
 ENV_FILE="${REPO_ROOT}/.env"
 
-# Colors for output
+# Colours for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m' # No Colour
 
 # Logging functions
 log_info() {
@@ -71,14 +75,20 @@ fi
 if [[ -z "${CLIENT_ID:-}" ]] || [[ -z "${CLIENT_SECRET:-}" ]] || [[ -z "${TENANT_ID:-}" ]]; then
     log_error "Missing required credentials"
     log_error ""
-    log_error "Option 1: Create .env file from .env.example:"
-    log_error "  cp .env.example .env"
-    log_error "  # Edit .env with your Azure App Registration credentials"
+    log_error "Run 'just env-check' to see exactly which names are unset."
+    log_error ""
+    log_error "Option 1 (preferred): encrypted store, loaded by .envrc"
+    log_error "  chezmoi edit ~/.config/env/oib-converter.env"
+    log_error "  direnv allow"
     log_error ""
     log_error "Option 2: Set environment variables:"
     log_error "  export CLIENT_ID=your-app-id"
     log_error "  export CLIENT_SECRET=your-secret"
     log_error "  export TENANT_ID=your-tenant-id"
+    log_error ""
+    log_error "Option 3 (fallback): Create .env file from .env.example:"
+    log_error "  cp .env.example .env"
+    log_error "  # Edit .env with your Azure App Registration credentials"
     log_error ""
     log_error "See README.md for creating an Azure App Registration"
     exit 1
