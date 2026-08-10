@@ -19,6 +19,8 @@ build/
 *.swo
 
 # Environment
+# NB: .envrc is committed on purpose (secret overlay loader, no values in it)
+# and is not matched by the patterns below.
 .env
 .env.local
 
@@ -38,4 +40,3 @@ htmlcov/
 
 # macOS
 .DS_Store
-.env

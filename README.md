@@ -14,25 +14,31 @@ Convert [OpenIntuneBaseline](https://github.com/SkipToTheEndpoint/OpenIntuneBase
 ## Quick Start
 
 ```bash
-# 1. Install uv and just
+# 1. Install the toolchain (Homebrew-owned; mise supplies Python)
 curl -LsSf https://astral.sh/uv/install.sh | sh
-brew install just  # or: cargo install just
+brew install just jq mise direnv shellcheck  # shellcheck is needed by `just lint`
 
-# 2. Clone and sync dependencies
+# 2. Clone
 git clone https://github.com/Talieisin/oib-converter.git
 cd oib-converter
+
+# 3. Trust the project tooling (one-time)
+mise trust    # accepts mise.toml — pins Python 3.12
+direnv allow  # accepts .envrc — loads your Azure credentials from your store
+
+# 4. Supply Azure credentials (see "Azure Credential Setup" below)
+just env-check  # reports which of the three names are still unset
+
+# 5. Sync dependencies, fetch the schema, convert
 just sync
-
-# 3. Configure Azure credentials
-cp .env.example .env
-# Edit .env with your credentials (see below)
-
-# 4. Fetch Graph API schema
 just fetch-schema
-
-# 5. Convert all profiles
 just convert
 ```
+
+A fresh clone needs no file copying: `.envrc` reads your credentials from
+`~/.config/env/oib-converter.env`, and `just fetch-schema` regenerates
+`cache/graph-schema.json` (~37 MB, git-ignored, required by every conversion).
+Run `just sync` before `just fetch-schema` — the fetcher uses `.venv`.
 
 ## Azure Credential Setup
 
@@ -61,17 +67,36 @@ If you already have an Azure service principal with Intune access, use those cre
 
 ### Configure Credentials
 
+Three variables are required: `CLIENT_ID`, `TENANT_ID` and `CLIENT_SECRET`.
+`.env.example` is the key-only schema — it never contains values.
+
+**This repository is public.** None of the three belongs in a tracked file,
+including the tenant and client IDs.
+
+**Preferred — encrypted store (survives a fresh clone, nothing in the repo):**
+
 ```bash
-cp .env.example .env
-# Edit .env with your values
+chezmoi edit ~/.config/env/oib-converter.env  # age-encrypted in your dotfiles
+direnv allow                                  # one-time, per checkout
+just env-check                                # confirms all three are set
 ```
 
-Or set environment variables:
+`.envrc` loads that file automatically whenever you `cd` into the project.
+
+**Alternative — export in your shell:**
 
 ```bash
 export CLIENT_ID=your-app-id
 export CLIENT_SECRET=your-secret
 export TENANT_ID=your-tenant-id
+```
+
+**Fallback — tree-local `.env`** (git-ignored, but does not survive a fresh
+clone, so prefer one of the above):
+
+```bash
+cp .env.example .env
+# Edit .env with your values
 ```
 
 ## Usage
@@ -202,6 +227,14 @@ Bug reported to Microsoft Intune support (December 2025).
 ## Development
 
 This project uses [uv](https://docs.astral.sh/uv/) for dependency management and [just](https://github.com/casey/just) for task running.
+[mise](https://mise.jdx.dev/) pins the Python runtime (`mise.toml`, currently
+3.12 — the highest version CI exercises); `uv`, `just`, `jq` and `shellcheck`
+are Homebrew-owned and deliberately absent from `mise.toml`.
+[direnv](https://direnv.net/) loads credentials via `.envrc` — secrets only, no
+PATH or layout directives, so the two layers stay disjoint.
+
+Note that `just clean` deletes `cache/graph-schema.json`; rebuild it with
+`just fetch-schema`, which needs working credentials.
 
 ```bash
 # List available commands
@@ -211,6 +244,7 @@ just
 just sync
 
 # Available commands
+just env-check       # Report which Azure credential names are unset (never values)
 just fetch-schema    # Fetch Graph API schema (requires Azure credentials)
 just fetch-profiles  # Fetch OIB profiles from GitHub
 just convert         # Convert all profiles using mapping.yaml
