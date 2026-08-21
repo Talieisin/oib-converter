@@ -26,7 +26,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 # Schema older than this triggers a warning
 SCHEMA_MAX_AGE_DAYS = 90
@@ -39,7 +39,7 @@ except ImportError:
 try:
     import requests
 except ImportError:
-    requests = None  # Will be checked at runtime
+    requests = None  # type: ignore[assignment]  # Will be checked at runtime
 
 # Logger - configured in main() to avoid side effects when used as library
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ def _check_dependencies():
         sys.exit(1)
 
 
-def parse_bool(value: Any) -> Optional[bool]:
+def parse_bool(value: Any) -> bool | None:
     """
     Parse a boolean value from various representations.
 
@@ -158,14 +158,14 @@ class GraphSchemaLoader:
         except (ValueError, TypeError) as e:
             logger.debug(f"Could not parse schema timestamp: {e}")
 
-    def get_setting_definition(self, setting_id: str) -> Optional[dict[str, Any]]:
+    def get_setting_definition(self, setting_id: str) -> dict[str, Any] | None:
         """Get setting definition by ID, tracking missing ones"""
         definition = self.settings_map.get(setting_id)
         if definition is None:
             self.missing_settings.add(setting_id)
         return definition
 
-    def resolve_plist_key(self, setting_id: str) -> Optional[str]:
+    def resolve_plist_key(self, setting_id: str) -> str | None:
         """Extract Apple plist key from setting definition"""
         definition = self.get_setting_definition(setting_id)
         if not definition:
@@ -219,7 +219,7 @@ class GraphSchemaLoader:
         logger.warning(f"Choice value '{choice_value_id}' not found in schema for {setting_id}")
         return None
 
-    def parse_base_uri(self, setting_id: str) -> tuple[Optional[str], Optional[str]]:
+    def parse_base_uri(self, setting_id: str) -> tuple[str | None, str | None]:
         """
         Parse baseUri to extract PayloadType and parent dictionary path.
 
@@ -319,12 +319,12 @@ class GraphSchemaLoader:
         # Default: return as-is (most Apple domains are lowercase)
         return domain
 
-    def get_payload_type(self, setting_id: str) -> Optional[str]:
+    def get_payload_type(self, setting_id: str) -> str | None:
         """Get the correct PayloadType from schema baseUri"""
         payload_type, _ = self.parse_base_uri(setting_id)
         return payload_type
 
-    def get_parent_dict(self, setting_id: str) -> Optional[str]:
+    def get_parent_dict(self, setting_id: str) -> str | None:
         """Get the parent dictionary name for nesting (e.g., 'antivirusEngine')"""
         _, parent = self.parse_base_uri(setting_id)
         return parent
@@ -350,10 +350,10 @@ class GraphSchemaLoader:
 @dataclass
 class ConvertedSetting:
     """Result of converting a single setting"""
-    key: Optional[str]
+    key: str | None
     value: Any
-    parent_dict: Optional[str]  # e.g., "antivirusEngine", "cloudService"
-    payload_type: Optional[str]  # e.g., "com.microsoft.wdav"
+    parent_dict: str | None  # e.g., "antivirusEngine", "cloudService"
+    payload_type: str | None  # e.g., "com.microsoft.wdav"
 
 
 class SettingConverter:
@@ -363,7 +363,7 @@ class SettingConverter:
         self.schema_loader = schema_loader
         self.conversion_errors: list[str] = []
 
-    def extract_setting_key(self, setting_id: str) -> Optional[str]:
+    def extract_setting_key(self, setting_id: str) -> str | None:
         """
         Extract the actual setting key from the settingDefinitionId using schema.
 
@@ -378,7 +378,7 @@ class SettingConverter:
         self.conversion_errors.append(f"Unknown setting: {setting_id}")
         return None
 
-    def get_nesting_info(self, setting_id: str) -> tuple[Optional[str], Optional[str]]:
+    def get_nesting_info(self, setting_id: str) -> tuple[str | None, str | None]:
         """Get payload_type and parent_dict for a setting"""
         return self.schema_loader.parse_base_uri(setting_id)
 
@@ -531,7 +531,7 @@ class SettingConverter:
 
         return result
 
-    def _convert_generic_key_value(self, group: dict[str, Any]) -> Optional[tuple]:
+    def _convert_generic_key_value(self, group: dict[str, Any]) -> tuple | None:
         """
         Convert a generic key-value group to a (key, value) tuple.
 
@@ -723,7 +723,7 @@ class MobileconfigGenerator:
         self,
         json_data: dict[str, Any],
         organization: str = "Talieisin",
-        custom_payload_type: Optional[str] = None,
+        custom_payload_type: str | None = None,
         scope: str = "System",
         removal_disallowed: bool = True
     ) -> dict[str, Any]:
@@ -903,8 +903,8 @@ class BatchConverter:
         self,
         mapping_path: Path,
         output_root: Path,
-        organization_override: Optional[str] = None,
-        source_path: Optional[Path] = None,
+        organization_override: str | None = None,
+        source_path: Path | None = None,
     ):
         self.mapping_path = mapping_path
         self.output_root = output_root
@@ -995,7 +995,7 @@ class BatchConverter:
         return content
 
     @classmethod
-    def _resolve_source_path(cls, raw_path: Optional[Path]) -> Optional[Path]:
+    def _resolve_source_path(cls, raw_path: Path | None) -> Path | None:
         """Resolve a --source-path value to the directory that actually
         holds the OIB JSON files.
 
@@ -1036,6 +1036,8 @@ class BatchConverter:
 
     def _load_profile_from_github(self, oib_name: str) -> dict[str, Any]:
         """Download an OIB profile JSON from the upstream GitHub raw URL."""
+        if requests is None:
+            raise ImportError("requests not installed. Run: pip install requests")
         json_url = f"{self.GITHUB_BASE_URL}/{oib_name}.json"
         logger.info(f"Downloading: {oib_name}")
 
@@ -1043,7 +1045,7 @@ class BatchConverter:
             response = requests.get(json_url, timeout=30)
             response.raise_for_status()
         except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 404:
+            if e.response is not None and e.response.status_code == 404:
                 raise Exception(f"Profile not found on OIB GitHub: {oib_name}") from e
             raise
         except Exception as e:
@@ -1059,7 +1061,7 @@ class BatchConverter:
         output_path: str,
         converter: SettingConverter,
         generator: MobileconfigGenerator,
-        custom_payload_type: Optional[str] = None
+        custom_payload_type: str | None = None
     ):
         """Convert a single profile from OIB to mobileconfig"""
         if self.source_path is not None:
