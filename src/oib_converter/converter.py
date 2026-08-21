@@ -1036,6 +1036,8 @@ class BatchConverter:
 
     def _load_profile_from_github(self, oib_name: str) -> dict[str, Any]:
         """Download an OIB profile JSON from the upstream GitHub raw URL."""
+        if requests is None:
+            raise ImportError("requests not installed. Run: pip install requests")
         json_url = f"{self.GITHUB_BASE_URL}/{oib_name}.json"
         logger.info(f"Downloading: {oib_name}")
 
