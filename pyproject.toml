@@ -8,7 +8,7 @@ version = "1.0.0"
 description = "Convert OpenIntuneBaseline JSON profiles to Apple mobileconfig format"
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 authors = [
     { name = "Talieisin", email = "it@talieisin.com" }
 ]
