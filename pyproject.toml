@@ -45,6 +45,7 @@ dev = [
     "pytest>=7.0",
     "ruff>=0.16.3",
     "mypy>=1.19.1",
+    "types-pyyaml>=6.0",
 ]
 
 [dependency-groups]
@@ -52,6 +53,7 @@ dev = [
     "pytest>=7.0",
     "ruff>=0.16.3",
     "mypy>=1.19.1",
+    "types-pyyaml>=6.0",
 ]
 
 [project.scripts]

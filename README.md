@@ -248,7 +248,7 @@ just env-check       # Report which Azure credential names are unset (never valu
 just fetch-schema    # Fetch Graph API schema (requires Azure credentials)
 just fetch-profiles  # Fetch OIB profiles from GitHub
 just convert         # Convert all profiles using mapping.yaml
-just lint            # Run linters (ruff, shellcheck)
+just lint            # Run linters (ruff, mypy, shellcheck)
 just clean           # Remove generated files and caches
 ```
 

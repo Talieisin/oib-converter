@@ -48,9 +48,10 @@ fetch-profiles:
 convert:
     uv run python -m oib_converter.converter --batch --verbose
 
-# Run linters (ruff, shellcheck)
+# Run linters (ruff, mypy, shellcheck)
 lint:
     uv run ruff check src/
+    uv run mypy src/
     shellcheck scripts/*.sh
 
 # Remove generated files and caches

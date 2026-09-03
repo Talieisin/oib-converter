@@ -34,7 +34,7 @@ SCHEMA_MAX_AGE_DAYS = 90
 try:
     import yaml
 except ImportError:
-    yaml = None  # Will be checked at runtime
+    yaml = None  # type: ignore[assignment]  # Will be checked at runtime
 
 try:
     import requests
@@ -86,8 +86,8 @@ class GraphSchemaLoader:
 
     def __init__(self, schema_path: Path):
         self.schema_path = schema_path
-        self.schema = None
-        self.settings_map: dict[str, Any] = {}
+        self.schema: dict[str, Any] = {}
+        self.settings_map: dict[str, dict[str, Any]] = {}
         self.missing_settings: set[str] = set()
 
         self._load_schema()
@@ -172,19 +172,19 @@ class GraphSchemaLoader:
             return None
 
         # Primary: Use offsetUri from Graph API (most accurate)
-        offset_uri = definition.get('offsetUri', '')
+        offset_uri: str = definition.get('offsetUri', '')
         if offset_uri:
             # offsetUri is like "antivirusEngine/enforcementLevel"
             # Last component is the key
             return offset_uri.split('/')[-1]
 
         # Secondary: Use displayName or name field
-        display_name = definition.get('displayName', '')
+        display_name: str = definition.get('displayName', '')
         if display_name:
             # Often the display name IS the key
             return display_name
 
-        name = definition.get('name', '')
+        name: str = definition.get('name', '')
         if name:
             # Name might be like "enforcementLevel (antivirusEngine)"
             if '(' in name:
@@ -926,10 +926,16 @@ class BatchConverter:
         """Load YAML mapping file"""
         try:
             with open(self.mapping_path) as f:
-                return yaml.safe_load(f)
+                data = yaml.safe_load(f)
         except Exception as e:
             logger.error(f"Failed to load mapping file: {e}")
             raise
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"Mapping file must contain a top-level mapping "
+                f"(got {type(data).__name__}): {self.mapping_path}"
+            )
+        return data
 
     def convert_all(
         self,
@@ -994,6 +1000,16 @@ class BatchConverter:
             return content[3:]
         return content
 
+    @staticmethod
+    def _parse_profile_json(content: bytes, origin: str) -> dict[str, Any]:
+        """Decode a BOM-stripped OIB profile and require a top-level JSON object."""
+        data = json.loads(content.decode('utf-8'))
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"OIB profile is not a JSON object (got {type(data).__name__}): {origin}"
+            )
+        return data
+
     @classmethod
     def _resolve_source_path(cls, raw_path: Path | None) -> Path | None:
         """Resolve a --source-path value to the directory that actually
@@ -1023,6 +1039,8 @@ class BatchConverter:
 
     def _load_profile_from_path(self, oib_name: str) -> dict[str, Any]:
         """Read an OIB profile JSON from a local source-path directory."""
+        if self.source_path is None:
+            raise RuntimeError("_load_profile_from_path called without a --source-path")
         json_file = self.source_path / f"{oib_name}.json"
         logger.info(f"Reading local: {json_file}")
 
@@ -1032,7 +1050,7 @@ class BatchConverter:
             )
 
         content = self._strip_utf8_bom(json_file.read_bytes())
-        return json.loads(content.decode('utf-8'))
+        return self._parse_profile_json(content, str(json_file))
 
     def _load_profile_from_github(self, oib_name: str) -> dict[str, Any]:
         """Download an OIB profile JSON from the upstream GitHub raw URL."""
@@ -1053,7 +1071,7 @@ class BatchConverter:
             raise
 
         content = self._strip_utf8_bom(response.content)
-        return json.loads(content.decode('utf-8'))
+        return self._parse_profile_json(content, json_url)
 
     def convert_profile(
         self,
