@@ -264,11 +264,18 @@ while url:
 
     print(f"  Retrieved {len(settings)} settings (total: {len(all_settings)})", file=sys.stderr)
 
-# Filter to macOS-relevant settings (Apple native + Microsoft apps for macOS)
-# Include: apple, mac, microsoft (wdav/defender, edge, office, onedrive, teams)
-# Also include: loginwindow, screensaver (some settings lack com.apple. prefix)
-def is_macos_relevant(setting_id):
-    sid = setting_id.lower()
+# Filter by the catalogue's applicability metadata first. Identifier-only
+# filtering dropped DDM definitions such as `enforcement_*`,
+# `softwareupdate_*`, and `app_privacy_*` because those IDs do not contain
+# "apple" or "mac". Keep the identifier fallback for older definitions whose
+# applicability metadata is absent.
+def is_macos_relevant(setting):
+    applicability = setting.get("applicability") or {}
+    platforms = str(applicability.get("platform") or "")
+    if "macOS" in platforms.split(","):
+        return True
+
+    sid = str(setting.get("id") or "").lower()
     return any(kw in sid for kw in [
         "apple", "mac",  # Apple native settings
         "microsoft", "wdav", "defender",  # Microsoft Defender
@@ -276,7 +283,7 @@ def is_macos_relevant(setting_id):
         "loginwindow", "screensaver",  # Settings sometimes missing com.apple. prefix
     ])
 
-macos_settings = [s for s in all_settings if is_macos_relevant(s.get("id", ""))]
+macos_settings = [s for s in all_settings if is_macos_relevant(s)]
 
 print(f"\nTotal settings: {len(all_settings)}", file=sys.stderr)
 print(f"macOS-relevant settings: {len(macos_settings)}", file=sys.stderr)

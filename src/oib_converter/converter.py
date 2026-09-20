@@ -81,6 +81,23 @@ class SchemaError(Exception):
     pass
 
 
+class OutputCompatibilityError(Exception):
+    """Raised when a setting cannot be represented by the requested output kind."""
+
+
+def iter_setting_definition_ids(value: Any):
+    """Yield settingDefinitionId values from arbitrarily nested Graph JSON."""
+    if isinstance(value, dict):
+        setting_id = value.get("settingDefinitionId")
+        if isinstance(setting_id, str):
+            yield setting_id
+        for child in value.values():
+            yield from iter_setting_definition_ids(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from iter_setting_definition_ids(child)
+
+
 class GraphSchemaLoader:
     """Loads and manages Graph API setting definitions schema - REQUIRED for conversion"""
 
@@ -218,6 +235,66 @@ class GraphSchemaLoader:
         # Value not found in options
         logger.warning(f"Choice value '{choice_value_id}' not found in schema for {setting_id}")
         return None
+
+    def technologies_for(self, setting_id: str) -> set[str]:
+        """Return the deployment technologies declared for a setting."""
+        definition = self.get_setting_definition(setting_id)
+        if not definition:
+            return set()
+        applicability = definition.get("applicability") or {}
+        raw = applicability.get("technologies") or definition.get("technologies") or ""
+        return {item.strip() for item in str(raw).split(",") if item.strip()}
+
+    def assert_mobileconfig_compatible(self, graph_json: dict[str, Any]) -> None:
+        """Reject DDM-only settings before attempting plist conversion."""
+        incompatible = sorted({
+            setting_id
+            for setting_id in iter_setting_definition_ids(graph_json.get("settings", []))
+            if "appleRemoteManagement" in self.technologies_for(setting_id)
+            and "mdm" not in self.technologies_for(setting_id)
+        })
+        if incompatible:
+            raise OutputCompatibilityError(
+                "mobileconfig output cannot carry DDM-only settings: "
+                + ", ".join(incompatible)
+            )
+
+    def assert_settings_catalog_compatible(self, graph_json: dict[str, Any]) -> None:
+        """Validate DDM setting and choice identifiers against the live schema."""
+        errors: list[str] = []
+
+        def visit(value: Any) -> None:
+            if isinstance(value, dict):
+                setting_id = value.get("settingDefinitionId")
+                if isinstance(setting_id, str):
+                    definition = self.get_setting_definition(setting_id)
+                    if not definition:
+                        errors.append(f"unknown setting definition {setting_id}")
+                    elif "appleRemoteManagement" not in self.technologies_for(setting_id):
+                        errors.append(f"{setting_id} is not available through DDM")
+                    choice = value.get("choiceSettingValue")
+                    if isinstance(choice, dict) and definition:
+                        choice_id = choice.get("value")
+                        valid_ids = {
+                            option.get("itemId") for option in definition.get("options", [])
+                        }
+                        if choice_id not in valid_ids:
+                            errors.append(
+                                f"invalid choice {choice_id!r} for {setting_id}; "
+                                f"expected one of {sorted(item for item in valid_ids if item)}"
+                            )
+                for child in value.values():
+                    visit(child)
+            elif isinstance(value, list):
+                for child in value:
+                    visit(child)
+
+        visit(graph_json.get("settings", []))
+        if errors:
+            raise OutputCompatibilityError(
+                "Settings Catalog/DDM artifact is incompatible with the Graph schema: "
+                + "; ".join(errors)
+            )
 
     def parse_base_uri(self, setting_id: str) -> tuple[str | None, str | None]:
         """
@@ -949,6 +1026,8 @@ class BatchConverter:
             oib_name = profile.get('oib_name')
             output_path = profile.get('output_path')
             custom_payload_type = profile.get('payload_type')
+            output_kind = profile.get('output_kind', 'mobileconfig')
+            migration = profile.get('migration')
             enabled = profile.get('enabled', True)
 
             if not enabled:
@@ -966,7 +1045,9 @@ class BatchConverter:
                     output_path=output_path,
                     converter=converter,
                     generator=generator,
-                    custom_payload_type=custom_payload_type
+                    custom_payload_type=custom_payload_type,
+                    output_kind=output_kind,
+                    migration=migration,
                 )
                 success_count += 1
             except Exception as e:
@@ -1061,15 +1142,34 @@ class BatchConverter:
         output_path: str,
         converter: SettingConverter,
         generator: MobileconfigGenerator,
-        custom_payload_type: str | None = None
+        custom_payload_type: str | None = None,
+        output_kind: str = "mobileconfig",
+        migration: str | None = None,
     ):
-        """Convert a single profile from OIB to mobileconfig"""
+        """Convert one OIB profile to the explicitly requested artifact kind."""
         if self.source_path is not None:
             json_data = self._load_profile_from_path(oib_name)
         else:
             json_data = self._load_profile_from_github(oib_name)
 
-        logger.info(f"Converting: {oib_name}")
+        if output_kind not in {"mobileconfig", "settings_catalog_json"}:
+            raise ValueError(f"Unsupported output_kind: {output_kind}")
+
+        logger.info(f"Converting: {oib_name} ({output_kind})")
+        full_output_path = self.output_root / output_path
+
+        if output_kind == "settings_catalog_json":
+            if migration != "macos27_software_update":
+                raise OutputCompatibilityError(
+                    "settings_catalog_json requires an explicit semantic migration; "
+                    f"unsupported migration: {migration!r}"
+                )
+            artifact = self._migrate_macos27_software_update(json_data)
+            converter.schema_loader.assert_settings_catalog_compatible(artifact)
+            self._write_json(artifact, full_output_path)
+            return
+
+        converter.schema_loader.assert_mobileconfig_compatible(json_data)
         mobileconfig = generator.convert_json_to_mobileconfig(
             json_data,
             organization=self.organization,
@@ -1078,9 +1178,198 @@ class BatchConverter:
             removal_disallowed=self.removal_disallowed
         )
 
-        # Resolve output path relative to output root
-        full_output_path = self.output_root / output_path
         generator.write_mobileconfig(mobileconfig, full_output_path)
+
+    @staticmethod
+    def _write_json(data: dict[str, Any], output_path: Path) -> None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    @staticmethod
+    def _migrate_macos27_software_update(source: dict[str, Any]) -> dict[str, Any]:
+        """Map the legacy OIB update intent to Apple's DDM settings declaration.
+
+        App Store application updates are deliberately absent: Apple's DDM
+        SoftwareUpdate declaration manages OS/security updates, so the legacy
+        App Store preference must remain deployed independently.
+        """
+        source_choices: dict[str, str] = {}
+
+        def collect_choices(value: Any) -> None:
+            if isinstance(value, dict):
+                setting_id = value.get("settingDefinitionId")
+                choice = value.get("choiceSettingValue")
+                if isinstance(setting_id, str) and isinstance(choice, dict):
+                    choice_value = choice.get("value")
+                    if isinstance(choice_value, str):
+                        source_choices[setting_id] = choice_value
+                for child in value.values():
+                    collect_choices(child)
+            elif isinstance(value, list):
+                for child in value:
+                    collect_choices(child)
+
+        collect_choices(source.get("settings", []))
+        required = {
+            "com.apple.softwareupdate_automaticcheckenabled",
+            "com.apple.softwareupdate_automaticdownload",
+            "com.apple.softwareupdate_automaticallyinstallappupdates",
+            "com.apple.softwareupdate_automaticallyinstallmacosupdates",
+            "com.apple.softwareupdate_configdatainstall",
+            "com.apple.softwareupdate_criticalupdateinstall",
+            "com.apple.softwareupdate_restrict-software-update-require-admin-to-install",
+        }
+        source_ids = {
+            setting_id
+            for setting_id in iter_setting_definition_ids(source.get("settings", []))
+            if setting_id.startswith("com.apple.softwareupdate_")
+        }
+        expected_ids = required | {
+            "com.apple.softwareupdate_com.apple.softwareupdate"
+        }
+        missing = sorted(required - source_choices.keys())
+        if missing:
+            raise OutputCompatibilityError(
+                "macos27_software_update source no longer contains the expected legacy "
+                "controls; review the semantic migration: " + ", ".join(missing)
+            )
+        unexpected = sorted(source_ids - expected_ids)
+        if unexpected:
+            raise OutputCompatibilityError(
+                "macos27_software_update source contains unclassified controls; "
+                "review the semantic migration: " + ", ".join(unexpected)
+            )
+
+        def source_bool(setting_id: str) -> bool:
+            value = source_choices[setting_id]
+            if value.endswith("_true"):
+                return True
+            if value.endswith("_false"):
+                return False
+            raise OutputCompatibilityError(
+                f"macos27_software_update cannot interpret {setting_id}={value!r}"
+            )
+
+        automatic_check = source_bool("com.apple.softwareupdate_automaticcheckenabled")
+        automatic_download = source_bool("com.apple.softwareupdate_automaticdownload")
+        automatic_app_updates = source_bool(
+            "com.apple.softwareupdate_automaticallyinstallappupdates"
+        )
+        automatic_os_updates = source_bool(
+            "com.apple.softwareupdate_automaticallyinstallmacosupdates"
+        )
+        config_data = source_bool("com.apple.softwareupdate_configdatainstall")
+        critical_updates = source_bool("com.apple.softwareupdate_criticalupdateinstall")
+        require_admin = source_bool(
+            "com.apple.softwareupdate_restrict-software-update-require-admin-to-install"
+        )
+
+        if config_data != critical_updates:
+            raise OutputCompatibilityError(
+                "DDM InstallSecurityUpdate combines ConfigDataInstall and "
+                "CriticalUpdateInstall, but the source values differ"
+            )
+        if not automatic_check:
+            raise OutputCompatibilityError(
+                "DDM has no equivalent for disabling automatic update discovery"
+            )
+        if not automatic_app_updates:
+            raise OutputCompatibilityError(
+                "global App Store automatic updates have no DDM software-update "
+                "equivalent; migrate managed apps individually"
+            )
+        if require_admin:
+            raise OutputCompatibilityError(
+                "the legacy App Store admin requirement has no equivalent in the "
+                "DDM software-update declaration"
+            )
+
+        def enum_choice(setting_id: str, enabled: bool) -> dict[str, Any]:
+            # Intune encodes Apple's AlwaysOn/AlwaysOff enum as _1/_2.
+            option = "1" if enabled else "2"
+            return {
+                "@odata.type": (
+                    "#microsoft.graph.deviceManagementConfigurationChoiceSettingInstance"
+                ),
+                "settingDefinitionId": setting_id,
+                "choiceSettingValue": {
+                    "@odata.type": (
+                        "#microsoft.graph.deviceManagementConfigurationChoiceSettingValue"
+                    ),
+                    "value": f"{setting_id}_{option}",
+                    "children": [],
+                },
+            }
+
+        root = {
+            "@odata.type": (
+                "#microsoft.graph.deviceManagementConfigurationGroupSettingCollectionInstance"
+            ),
+            "settingDefinitionId": "softwareupdate_softwareupdate",
+            "groupSettingCollectionValue": [{
+                "children": [
+                    {
+                        "@odata.type": (
+                            "#microsoft.graph.deviceManagementConfigurationGroupSettingCollectionInstance"
+                        ),
+                        "settingDefinitionId": "softwareupdate_automaticactions",
+                        "groupSettingCollectionValue": [{
+                            "children": [
+                                enum_choice(
+                                    "softwareupdate_automaticactions_download",
+                                    automatic_download,
+                                ),
+                                enum_choice(
+                                    "softwareupdate_automaticactions_installosupdates",
+                                    automatic_os_updates,
+                                ),
+                                enum_choice(
+                                    "softwareupdate_automaticactions_installsecurityupdate",
+                                    critical_updates,
+                                ),
+                            ]
+                        }],
+                    },
+                ]
+            }],
+        }
+        return {
+            "name": "MacOS - OIB - Updates - DDM Settings - v1.0",
+            "description": (
+                "Semantic DDM successor to the OIB com.apple.SoftwareUpdate payload. "
+                "Generated by oib-converter; rollout is controlled by Terraform."
+            ),
+            "platforms": "macOS",
+            "technologies": "appleRemoteManagement",
+            "settings": [root],
+            "source_coverage": {
+                "mapped": {
+                    "AutomaticDownload": "AutomaticActions.Download",
+                    "AutomaticallyInstallMacOSUpdates": (
+                        "AutomaticActions.InstallOSUpdates"
+                    ),
+                    "ConfigDataInstall + CriticalUpdateInstall": (
+                        "AutomaticActions.InstallSecurityUpdate"
+                    ),
+                },
+                "superseded": {
+                    "AutomaticCheckEnabled": (
+                        "DDM continuously manages software-update availability"
+                    )
+                },
+                "requires_separate_management": {
+                    "AutomaticallyInstallAppUpdates": (
+                        "DDM app.managed UpdateBehavior is per managed app; there is "
+                        "no global software-update.settings replacement"
+                    ),
+                    "restrict-software-update-require-admin-to-install=false": (
+                        "the source imposes no App Store installation restriction; "
+                        "DDM AllowStandardUserOSUpdates controls OS updates and is "
+                        "not a semantic replacement"
+                    ),
+                },
+            },
+        }
 
 
 def main():
@@ -1242,6 +1531,11 @@ def main():
             if content.startswith('\ufeff'):
                 content = content[1:]
             json_data = json.loads(content)
+
+        # Single-file conversion has the same output contract as a
+        # mobileconfig batch mapping. Refuse DDM-only input here too; otherwise
+        # a declaration can silently become an empty/UNKNOWN plist.
+        schema_loader.assert_mobileconfig_compatible(json_data)
 
         mobileconfig = generator.convert_json_to_mobileconfig(
             json_data,

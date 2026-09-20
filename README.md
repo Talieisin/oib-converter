@@ -10,6 +10,14 @@ Convert [OpenIntuneBaseline](https://github.com/SkipToTheEndpoint/OpenIntuneBase
 - Supports Microsoft Defender, Edge, Office, OneDrive, and system profiles
 - Handles nested settings (antivirusEngine, cloudService, etc.)
 - Converts string booleans to proper XML boolean types
+- Emits reviewed Settings Catalog/DDM JSON through explicit semantic migrations
+- Rejects DDM-only settings from mobileconfig output
+
+Mappings use `output_kind: settings_catalog_json` plus a named `migration` for
+DDM artifacts. Generated JSON contains stable policy metadata and raw setting
+instances; callers encode each instance for the Terraform provider. A raw JSON
+copy is deliberately unsupported because changing deployment technology can
+also change setting semantics.
 
 ## Quick Start
 
@@ -126,6 +134,13 @@ output/
 └── ...
 ```
 
+The batch is intentionally multi-format. The current mapping emits 17
+mobileconfig files and one reviewed Settings Catalog/DDM JSON artifact for
+software-update settings. Conversion is not assumed to be lossless across
+deployment technologies: the named migration verifies every legacy source
+control, validates generated setting and choice IDs against the fetched Graph
+schema, and fails when it cannot preserve a value.
+
 ### Single File Conversion
 
 ```bash
@@ -209,6 +224,13 @@ mobileconfig-validator output/**/*.mobileconfig
 
 - **FileVault Recovery Key Escrow**: Requires Intune-injected certificates, cannot be converted to standalone mobileconfig
 - **Platform SSO**: Full functionality requires Intune deployment
+- **Global App Store automatic updates**: Apple's DDM software-update settings
+  declaration has no replacement for the legacy
+  `AutomaticallyInstallAppUpdates` preference. Managed apps use their own
+  delivery/update channel; DDM-managed apps can use per-app
+  `com.apple.configuration.app.managed` `UpdateBehavior`. Unmanaged App Store
+  apps need an explicit operational decision when the legacy SoftwareUpdate
+  payload is retired.
 
 ## Known Issues
 
