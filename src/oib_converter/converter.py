@@ -1147,13 +1147,22 @@ class BatchConverter:
         migration: str | None = None,
     ):
         """Convert one OIB profile to the explicitly requested artifact kind."""
+        if output_kind not in {"mobileconfig", "settings_catalog_json"}:
+            raise OutputCompatibilityError(f"Unsupported output_kind: {output_kind}")
+        suffix = ".mobileconfig" if output_kind == "mobileconfig" else ".settings.json"
+        if not output_path.endswith(suffix):
+            raise OutputCompatibilityError(
+                f"{output_kind} output_path must end with {suffix}: {output_path}"
+            )
+        if output_kind == "mobileconfig" and migration is not None:
+            raise OutputCompatibilityError("migration requires output_kind=settings_catalog_json")
+        if output_kind == "settings_catalog_json" and custom_payload_type is not None:
+            raise OutputCompatibilityError("payload_type applies only to mobileconfig output")
+
         if self.source_path is not None:
             json_data = self._load_profile_from_path(oib_name)
         else:
             json_data = self._load_profile_from_github(oib_name)
-
-        if output_kind not in {"mobileconfig", "settings_catalog_json"}:
-            raise ValueError(f"Unsupported output_kind: {output_kind}")
 
         logger.info(f"Converting: {oib_name} ({output_kind})")
         full_output_path = self.output_root / output_path
@@ -1164,7 +1173,7 @@ class BatchConverter:
                     "settings_catalog_json requires an explicit semantic migration; "
                     f"unsupported migration: {migration!r}"
                 )
-            artifact = self._migrate_macos27_software_update(json_data)
+            artifact = self._migrate_macos27_software_update(json_data, converter.schema_loader)
             converter.schema_loader.assert_settings_catalog_compatible(artifact)
             self._write_json(artifact, full_output_path)
             return
@@ -1186,7 +1195,9 @@ class BatchConverter:
         output_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
     @staticmethod
-    def _migrate_macos27_software_update(source: dict[str, Any]) -> dict[str, Any]:
+    def _migrate_macos27_software_update(
+        source: dict[str, Any], schema: GraphSchemaLoader
+    ) -> dict[str, Any]:
         """Map the legacy OIB update intent to Apple's DDM settings declaration.
 
         App Store application updates are deliberately absent: Apple's DDM
@@ -1285,8 +1296,23 @@ class BatchConverter:
             )
 
         def enum_choice(setting_id: str, enabled: bool) -> dict[str, Any]:
-            # Intune encodes Apple's AlwaysOn/AlwaysOff enum as _1/_2.
-            option = "1" if enabled else "2"
+            # Resolve the Apple value, not an assumed numeric suffix in Graph.
+            semantic_value = "AlwaysOn" if enabled else "AlwaysOff"
+            definition = schema.get_setting_definition(setting_id) or {}
+            options = [
+                option for option in definition.get("options", [])
+                if option.get("optionValue", {}).get("value") == semantic_value
+                and isinstance(option.get("itemId"), str)
+                and any(
+                    parent.get("parentSettingId") == "softwareupdate_automaticactions"
+                    for parent in option.get("dependentOn", [])
+                )
+            ]
+            if len(options) != 1:
+                raise OutputCompatibilityError(
+                    f"Cannot resolve unique {semantic_value} choice for {setting_id} "
+                    "under softwareupdate_automaticactions"
+                )
             return {
                 "@odata.type": (
                     "#microsoft.graph.deviceManagementConfigurationChoiceSettingInstance"
@@ -1296,7 +1322,7 @@ class BatchConverter:
                     "@odata.type": (
                         "#microsoft.graph.deviceManagementConfigurationChoiceSettingValue"
                     ),
-                    "value": f"{setting_id}_{option}",
+                    "value": options[0]["itemId"],
                     "children": [],
                 },
             }

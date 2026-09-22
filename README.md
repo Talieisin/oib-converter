@@ -139,7 +139,17 @@ mobileconfig files and one reviewed Settings Catalog/DDM JSON artifact for
 software-update settings. Conversion is not assumed to be lossless across
 deployment technologies: the named migration verifies every legacy source
 control, validates generated setting and choice IDs against the fetched Graph
-schema, and fails when it cannot preserve a value.
+schema, and fails on unsupported source changes. It reconstructs the three OS/security
+update controls; it is not a generic Graph JSON passthrough or raw Apple declaration
+exporter. `source_coverage` records controls that are superseded or need separate
+management. In particular, the global App Store auto-update preference has no
+replacement here: manage app updates independently and review that coverage before
+retiring the legacy payload.
+
+Use `output_kind: settings_catalog_json`, `migration: macos27_software_update`,
+and a `.settings.json` output path together. The default `mobileconfig` kind
+requires a `.mobileconfig` path and rejects migration options. Enum choices are
+resolved from their Apple values and parent in the cached Graph schema.
 
 ### Single File Conversion
 
