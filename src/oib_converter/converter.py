@@ -1230,11 +1230,7 @@ class BatchConverter:
             "com.apple.softwareupdate_criticalupdateinstall",
             "com.apple.softwareupdate_restrict-software-update-require-admin-to-install",
         }
-        source_ids = {
-            setting_id
-            for setting_id in iter_setting_definition_ids(source.get("settings", []))
-            if setting_id.startswith("com.apple.softwareupdate_")
-        }
+        source_ids = set(iter_setting_definition_ids(source.get("settings", [])))
         expected_ids = required | {
             "com.apple.softwareupdate_com.apple.softwareupdate"
         }
@@ -1253,9 +1249,9 @@ class BatchConverter:
 
         def source_bool(setting_id: str) -> bool:
             value = source_choices[setting_id]
-            if value.endswith("_true"):
+            if value == f"{setting_id}_true":
                 return True
-            if value.endswith("_false"):
+            if value == f"{setting_id}_false":
                 return False
             raise OutputCompatibilityError(
                 f"macos27_software_update cannot interpret {setting_id}={value!r}"

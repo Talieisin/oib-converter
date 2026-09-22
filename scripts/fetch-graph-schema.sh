@@ -272,8 +272,8 @@ while url:
 def is_macos_relevant(setting):
     applicability = setting.get("applicability") or {}
     platforms = str(applicability.get("platform") or "")
-    if "macOS" in {platform.strip() for platform in platforms.split(",")}:
-        return True
+    if platforms.strip():
+        return "macOS" in {platform.strip() for platform in platforms.split(",")}
 
     sid = str(setting.get("id") or "").lower()
     return any(kw in sid for kw in [

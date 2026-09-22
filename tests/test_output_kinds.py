@@ -173,20 +173,31 @@ def test_software_update_migration_fails_when_source_semantics_drift(schema) -> 
         BatchConverter._migrate_macos27_software_update({"settings": []}, schema)
 
 
-def test_software_update_migration_fails_on_unclassified_source_control(schema) -> None:
+@pytest.mark.parametrize("setting_id", [
+    "com.apple.softwareupdate_allowprereleaseinstallation",
+    "com.apple.applicationaccess_allowappinstallation",
+])
+def test_software_update_migration_fails_on_unclassified_source_control(schema, setting_id) -> None:
     source = software_update_source()
     source["settings"].append(
         {
-            "settingDefinitionId": (
-                "com.apple.softwareupdate_allowprereleaseinstallation"
-            ),
+            "settingDefinitionId": setting_id,
             "choiceSettingValue": {
-                "value": "com.apple.softwareupdate_allowprereleaseinstallation_false"
+                "value": f"{setting_id}_false"
             },
         }
     )
 
     with pytest.raises(OutputCompatibilityError, match="unclassified controls"):
+        BatchConverter._migrate_macos27_software_update(source, schema)
+
+
+@pytest.mark.parametrize("value", ["unrelated-control_true", "unrelated-control_false",
+                                  "com.apple.softwareupdate_automaticcheckenabled_true"])
+def test_software_update_migration_rejects_mismatched_source_choice(schema, value):
+    source = software_update_source()
+    source["settings"][1]["choiceSettingValue"]["value"] = value
+    with pytest.raises(OutputCompatibilityError, match="cannot interpret"):
         BatchConverter._migrate_macos27_software_update(source, schema)
 
 
