@@ -72,6 +72,34 @@ def test_mobileconfig_accepts_dual_technology_setting(tmp_path: Path) -> None:
     )
 
 
+def test_mobileconfig_rejects_unknown_nested_setting_before_writing(tmp_path: Path) -> None:
+    import yaml
+
+    loader = write_schema(tmp_path / "schema.json", {
+        "known": {"applicability": {"technologies": "mdm"}},
+    })
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "unknown.json").write_text(json.dumps({"settings": [{
+        "settingInstance": {"settingDefinitionId": "known", "children": [
+            {"settingDefinitionId": "app_privacy_unknown"},
+        ]},
+    }]}))
+    mapping = tmp_path / "mapping.yaml"
+    mapping.write_text(yaml.safe_dump({"profiles": [{
+        "oib_name": "unknown", "output_kind": "mobileconfig",
+        "output_path": "unknown.mobileconfig",
+    }]}))
+    batch = BatchConverter(mapping, tmp_path / "out", source_path=source)
+    converter = SettingConverter(loader)
+    assert batch.convert_all(converter, MobileconfigGenerator(converter, loader)) == (0, 1)
+    assert not (tmp_path / "out/unknown.mobileconfig").exists()
+    with pytest.raises(OutputCompatibilityError, match="unknown setting definitions"):
+        loader.assert_mobileconfig_compatible({"settings": [{
+            "settingDefinitionId": "unknown",
+        }]})
+
+
 def software_update_source(enabled: bool = True) -> dict:
     ids = [
         "automaticcheckenabled",

@@ -246,10 +246,17 @@ class GraphSchemaLoader:
         return {item.strip() for item in str(raw).split(",") if item.strip()}
 
     def assert_mobileconfig_compatible(self, graph_json: dict[str, Any]) -> None:
-        """Reject DDM-only settings before attempting plist conversion."""
+        """Reject unknown or DDM-only settings before attempting plist conversion."""
+        setting_ids = set(iter_setting_definition_ids(graph_json.get("settings", [])))
+        unknown = sorted(sid for sid in setting_ids if not self.get_setting_definition(sid))
+        if unknown:
+            raise OutputCompatibilityError(
+                "mobileconfig output cannot classify unknown setting definitions; "
+                "refresh the Graph schema before conversion: " + ", ".join(unknown)
+            )
         incompatible = sorted({
             setting_id
-            for setting_id in iter_setting_definition_ids(graph_json.get("settings", []))
+            for setting_id in setting_ids
             if "appleRemoteManagement" in self.technologies_for(setting_id)
             and "mdm" not in self.technologies_for(setting_id)
         })
