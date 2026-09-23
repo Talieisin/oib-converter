@@ -49,6 +49,13 @@ profiles:
     enabled: true
     notes: "Automatic software update configuration"
 
+  - oib_name: "MacOS - OIB - Updates - D - Update Configuration - v1.0"
+    output_path: "system/software-updates.settings.json"
+    output_kind: "settings_catalog_json"
+    migration: "macos27_software_update"
+    enabled: true
+    notes: "DDM software-update settings for macOS 26+; Terraform controls rollout"
+
   # Microsoft 365 Applications
   - oib_name: "MacOS - OIB - Microsoft Office - D - Office Configuration - v1.0"
     output_path: "office/office-config.mobileconfig"

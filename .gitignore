@@ -31,6 +31,8 @@ cache/oib-macos/
 # Conversion output
 output/*.mobileconfig
 output/**/*.mobileconfig
+output/*.settings.json
+output/**/*.settings.json
 
 # Testing
 .pytest_cache/
