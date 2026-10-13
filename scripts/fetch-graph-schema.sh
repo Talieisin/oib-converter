@@ -218,7 +218,7 @@ log_info "Authentication successful"
 
 # Fetch setting definitions from Graph API
 log_info "Fetching setting definitions from Microsoft Graph API..."
-log_info "This may take 2-3 minutes for ~2,100 settings..."
+log_info "This may take 2-3 minutes: Graph returns every platform's definitions (~18,000) in one response..."
 
 GRAPH_URL="https://graph.microsoft.com/beta/deviceManagement/configurationSettings"
 
@@ -231,6 +231,12 @@ if ! ACCESS_TOKEN="$ACCESS_TOKEN" GRAPH_URL="$GRAPH_URL" GENERATED_AT="$GENERATE
 import os
 import sys
 import json
+import math
+import random
+import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+
 import requests
 
 access_token = os.environ.get("ACCESS_TOKEN", "")
@@ -241,6 +247,77 @@ headers = {
     "Accept": "application/json"
 }
 
+# The whole catalogue comes back as one large response, and Graph intermittently
+# answers it with 504 Gateway Timeout. Retry throttling (429), server errors (5xx)
+# and dropped connections with exponential backoff and jitter, honouring
+# Retry-After when Graph sends it.
+#
+# Do NOT add $top to shrink the response: Graph honours $top on this endpoint but
+# returns no @odata.nextLink, so the schema would be silently truncated.
+MAX_RETRIES = 5
+BASE_DELAY_SECONDS = 2.0
+MAX_BACKOFF_SECONDS = 60.0
+MAX_RETRY_AFTER_SECONDS = 300.0
+TRANSIENT_ERRORS = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+)
+
+
+def parse_retry_after(value):
+    """Return Retry-After (delta-seconds or HTTP-date) in seconds, or None if unusable."""
+    if not value:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        seconds = (when - datetime.now(timezone.utc)).total_seconds()
+    # float() accepts "nan", which survives the clamp below and makes time.sleep raise.
+    if math.isnan(seconds):
+        return None
+    return min(max(seconds, 0.0), MAX_RETRY_AFTER_SECONDS)
+
+
+def backoff_delay(retry):
+    backoff = min(BASE_DELAY_SECONDS * 2 ** (retry - 1), MAX_BACKOFF_SECONDS)
+    return backoff + random.uniform(0, backoff / 2)
+
+
+def get_json_with_retry(url):
+    retry = 0
+    while True:
+        try:
+            response = requests.get(url, headers=headers, timeout=60)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            if status is None or (status != 429 and status < 500) or retry >= MAX_RETRIES:
+                raise
+            reason = f"HTTP {status}"
+            retry_after = parse_retry_after(e.response.headers.get("Retry-After"))
+        except TRANSIENT_ERRORS as e:
+            if retry >= MAX_RETRIES:
+                raise
+            reason = type(e).__name__
+            retry_after = None
+
+        retry += 1
+        delay = retry_after if retry_after is not None else backoff_delay(retry)
+        print(
+            f"  {reason}; retrying in {delay:.1f}s (retry {retry}/{MAX_RETRIES})",
+            file=sys.stderr,
+        )
+        time.sleep(delay)
+
+
 all_settings = []
 page_count = 0
 
@@ -249,13 +326,11 @@ while url:
     print(f"Fetching page {page_count}...", file=sys.stderr)
 
     try:
-        response = requests.get(url, headers=headers, timeout=60)
-        response.raise_for_status()
+        data = get_json_with_retry(url)
     except requests.exceptions.RequestException as e:
         print(f"Error fetching data: {e}", file=sys.stderr)
         sys.exit(1)
 
-    data = response.json()
     settings = data.get("value", [])
     all_settings.extend(settings)
 
