@@ -117,4 +117,16 @@ def test_backoff_cap_jitter_and_retry_after_parsing(monkeypatch, capsys):
     assert parse_retry_after("86400") == 300.0
     assert parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT") == 0.0
     assert parse_retry_after("soon") is None
+    assert parse_retry_after("NaN") is None
+    assert parse_retry_after("inf") == 300.0
     assert parse_retry_after(None) is None
+
+
+def test_nan_retry_after_falls_back_to_backoff(monkeypatch, capsys):
+    _, calls, sleeps, exit_code = run_fetcher(
+        monkeypatch, [Response(429, headers={"Retry-After": "NaN"}), ok()]
+    )
+
+    assert exit_code is None
+    assert len(calls) == 2
+    assert sleeps == [2.0]

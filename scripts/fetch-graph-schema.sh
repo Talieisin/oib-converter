@@ -231,6 +231,7 @@ if ! ACCESS_TOKEN="$ACCESS_TOKEN" GRAPH_URL="$GRAPH_URL" GENERATED_AT="$GENERATE
 import os
 import sys
 import json
+import math
 import random
 import time
 from datetime import datetime, timezone
@@ -278,6 +279,9 @@ def parse_retry_after(value):
         if when.tzinfo is None:
             when = when.replace(tzinfo=timezone.utc)
         seconds = (when - datetime.now(timezone.utc)).total_seconds()
+    # float() accepts "nan", which survives the clamp below and makes time.sleep raise.
+    if math.isnan(seconds):
+        return None
     return min(max(seconds, 0.0), MAX_RETRY_AFTER_SECONDS)
 
 
