@@ -28,6 +28,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from oib_converter.apple_payload_types import canonical_apple_payload_type
+
 # Schema older than this triggers a warning
 SCHEMA_MAX_AGE_DAYS = 90
 
@@ -330,7 +332,9 @@ class GraphSchemaLoader:
             parent_path = None
 
             if len(parts) >= 2 and parts[0] == 'PayloadContent':
-                payload_type = parts[1]  # e.g., "com.microsoft.wdav"
+                # e.g., "com.microsoft.wdav". Apple types get Apple's casing;
+                # vendor types are not in Apple's list and pass through.
+                payload_type = canonical_apple_payload_type(parts[1])
 
             # Extract parent path (after mcx_preference_settings)
             if 'mcx_preference_settings' in base_uri:
@@ -370,38 +374,19 @@ class GraphSchemaLoader:
 
     def _normalize_apple_payload_type(self, domain: str) -> str:
         """
-        Normalise Apple domain to proper PayloadType format.
+        Normalise an Apple domain to Apple's PayloadType spelling.
 
-        Known mappings (Apple's actual PayloadType identifiers):
+        Settings-catalogue IDs are lowercase, but macOS matches PayloadType
+        case-sensitively, so the casing comes from Apple's own payload-type
+        list (see apple_payload_types). For example:
         - com.apple.softwareupdate -> com.apple.SoftwareUpdate
-        - com.apple.applicationaccess -> com.apple.applicationaccess (lowercase)
         - com.apple.mcx.filevault2 -> com.apple.MCX.FileVault2
-        - com.apple.security.firewall -> com.apple.security.firewall
-        - com.apple.loginwindow -> com.apple.loginwindow
-        - com.apple.screensaver -> com.apple.screensaver
+        - com.apple.tcc.configuration-profile-policy
+          -> com.apple.TCC.configuration-profile-policy
+        - com.apple.applicationaccess -> com.apple.applicationaccess (unchanged)
+        A domain that is not in Apple's list is returned as-is.
         """
-        # Known PayloadType mappings (domain -> actual PayloadType)
-        known_mappings = {
-            'com.apple.softwareupdate': 'com.apple.SoftwareUpdate',
-            'com.apple.mcx.filevault2': 'com.apple.MCX.FileVault2',
-            'com.apple.mcx': 'com.apple.MCX',
-            'com.apple.extensiblesso': 'com.apple.extensiblesso',
-            'com.apple.applicationaccess': 'com.apple.applicationaccess',
-            'com.apple.security.firewall': 'com.apple.security.firewall',
-            'com.apple.loginwindow': 'com.apple.loginwindow',
-            'com.apple.screensaver': 'com.apple.screensaver',
-            'com.apple.systempolicy.control': 'com.apple.systempolicy.control',
-            'com.apple.eas.account': 'com.apple.eas.account',
-            'com.apple.configurationprofile.identification': (
-                'com.apple.configurationprofile.identification'
-            ),
-        }
-
-        if domain in known_mappings:
-            return known_mappings[domain]
-
-        # Default: return as-is (most Apple domains are lowercase)
-        return domain
+        return canonical_apple_payload_type(domain)
 
     def get_payload_type(self, setting_id: str) -> str | None:
         """Get the correct PayloadType from schema baseUri"""
@@ -886,9 +871,11 @@ class MobileconfigGenerator:
                 payloads_by_type[pt]["root"][converted.key] = converted.value
 
         # Payload types that cannot be converted to standalone mobileconfig
-        # These require Intune to inject additional data at deploy time
+        # These require Intune to inject additional data at deploy time.
+        # Keys are Apple's spelling; the lookup below canonicalises first, so
+        # a custom_payload_type in any casing is matched too.
         UNSUPPORTED_PAYLOAD_TYPES = {
-            'com.apple.security.fderecoverykeyescrow': (
+            'com.apple.security.FDERecoveryKeyEscrow': (
                 "FileVault Recovery Key Escrow requires EncryptCertPayloadUUID and a "
                 "certificate payload that Intune injects automatically at deploy time. "
                 "This payload cannot function as a standalone mobileconfig."
@@ -903,8 +890,9 @@ class MobileconfigGenerator:
                 continue
 
             # Skip unsupported payload types that can't work standalone
-            if payload_type in UNSUPPORTED_PAYLOAD_TYPES:
-                reason = UNSUPPORTED_PAYLOAD_TYPES[payload_type]
+            unsupported_key = canonical_apple_payload_type(payload_type)
+            if unsupported_key in UNSUPPORTED_PAYLOAD_TYPES:
+                reason = UNSUPPORTED_PAYLOAD_TYPES[unsupported_key]
                 logger.warning(f"Skipping {payload_type}: {reason}")
                 continue
 
