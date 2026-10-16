@@ -87,6 +87,18 @@ class OutputCompatibilityError(Exception):
     """Raised when a setting cannot be represented by the requested output kind."""
 
 
+# Payload types that cannot be converted to a standalone mobileconfig: they
+# need Intune to inject additional data at deploy time. Keys are Apple's
+# spelling; every PayloadType the generator handles is canonicalised first.
+UNSUPPORTED_PAYLOAD_TYPES = {
+    'com.apple.security.FDERecoveryKeyEscrow': (
+        "FileVault Recovery Key Escrow requires EncryptCertPayloadUUID and a "
+        "certificate payload that Intune injects automatically at deploy time. "
+        "This payload cannot function as a standalone mobileconfig."
+    ),
+}
+
+
 def iter_setting_definition_ids(value: Any):
     """Yield settingDefinitionId values from arbitrarily nested Graph JSON."""
     if isinstance(value, dict):
@@ -825,6 +837,19 @@ class MobileconfigGenerator:
             converted = self.converter.convert_setting_instance(setting_instance)
             converted_settings.append(converted)
 
+        # A payload_type override is typed by hand, so give an Apple type
+        # Apple's casing (vendor types pass through unchanged). An override
+        # naming an unsupported type fails the profile: skipping it would
+        # leave only the empty fallback payload, which would still carry the
+        # override as its PayloadType.
+        if custom_payload_type is not None:
+            custom_payload_type = canonical_apple_payload_type(custom_payload_type)
+            if custom_payload_type in UNSUPPORTED_PAYLOAD_TYPES:
+                raise OutputCompatibilityError(
+                    f"payload_type override {custom_payload_type} cannot be converted: "
+                    f"{UNSUPPORTED_PAYLOAD_TYPES[custom_payload_type]}"
+                )
+
         # Group settings by PayloadType
         # Structure: {payload_type: {"nested": {parent: {key: val}}, "root": {key: val}}}
         payloads_by_type: dict[str, dict[str, Any]] = {}
@@ -870,18 +895,6 @@ class MobileconfigGenerator:
                 # Root-level setting
                 payloads_by_type[pt]["root"][converted.key] = converted.value
 
-        # Payload types that cannot be converted to standalone mobileconfig
-        # These require Intune to inject additional data at deploy time.
-        # Keys are Apple's spelling; the lookup below canonicalises first, so
-        # a custom_payload_type in any casing is matched too.
-        UNSUPPORTED_PAYLOAD_TYPES = {
-            'com.apple.security.FDERecoveryKeyEscrow': (
-                "FileVault Recovery Key Escrow requires EncryptCertPayloadUUID and a "
-                "certificate payload that Intune injects automatically at deploy time. "
-                "This payload cannot function as a standalone mobileconfig."
-            ),
-        }
-
         # Build inner payloads for each PayloadType
         inner_payloads = []
         for payload_type, content in payloads_by_type.items():
@@ -889,10 +902,11 @@ class MobileconfigGenerator:
                 logger.warning("Settings with unknown PayloadType will be skipped")
                 continue
 
-            # Skip unsupported payload types that can't work standalone
-            unsupported_key = canonical_apple_payload_type(payload_type)
-            if unsupported_key in UNSUPPORTED_PAYLOAD_TYPES:
-                reason = UNSUPPORTED_PAYLOAD_TYPES[unsupported_key]
+            # Skip unsupported payload types that can't work standalone.
+            # Derived types are already canonical, and an unsupported
+            # override was rejected above.
+            if payload_type in UNSUPPORTED_PAYLOAD_TYPES:
+                reason = UNSUPPORTED_PAYLOAD_TYPES[payload_type]
                 logger.warning(f"Skipping {payload_type}: {reason}")
                 continue
 

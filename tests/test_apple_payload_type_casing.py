@@ -15,7 +15,12 @@ from oib_converter.apple_payload_types import (
     APPLE_PAYLOAD_TYPES,
     canonical_apple_payload_type,
 )
-from oib_converter.converter import GraphSchemaLoader, MobileconfigGenerator, SettingConverter
+from oib_converter.converter import (
+    GraphSchemaLoader,
+    MobileconfigGenerator,
+    OutputCompatibilityError,
+    SettingConverter,
+)
 
 TCC = "com.apple.TCC.configuration-profile-policy"
 
@@ -171,20 +176,44 @@ def test_fde_recovery_key_escrow_is_still_skipped(tmp_path: Path) -> None:
     ]
 
 
-@pytest.mark.parametrize(
-    "custom", ["com.apple.security.fderecoverykeyescrow", "com.apple.security.FDERecoveryKeyEscrow"]
-)
-def test_fde_recovery_key_escrow_override_is_skipped_in_either_casing(
-    tmp_path: Path, custom: str
-) -> None:
-    # A mapping.yaml payload_type override is user-typed, so the skip list
-    # matches it case-insensitively.
+def convert_with_override(tmp_path: Path, custom: str) -> dict:
     firewall = "com.apple.security.firewall_enablefirewall"
     loader = write_schema(
         tmp_path / "schema.json", {firewall: choice_definition(firewall, "EnableFirewall", "true")}
     )
     generator = MobileconfigGenerator(SettingConverter(loader), loader)
-    profile = generator.convert_json_to_mobileconfig(
+    return generator.convert_json_to_mobileconfig(
         {"name": "Test", "settings": [choice_instance(firewall)]}, custom_payload_type=custom
     )
-    assert [p["PayloadDisplayName"] for p in profile["PayloadContent"]] == ["Empty Payload"]
+
+
+@pytest.mark.parametrize(
+    "custom", ["com.apple.security.fderecoverykeyescrow", "com.apple.security.FDERecoveryKeyEscrow"]
+)
+def test_fde_recovery_key_escrow_override_is_rejected_in_either_casing(
+    tmp_path: Path, custom: str
+) -> None:
+    # Skipping the override's payload would leave only the empty fallback
+    # payload, which carries the override as its PayloadType. So no escrow
+    # PayloadType may come out at all: the profile fails instead.
+    with pytest.raises(OutputCompatibilityError, match="FDERecoveryKeyEscrow") as excinfo:
+        profile = convert_with_override(tmp_path, custom)
+        emitted = [p["PayloadType"] for p in profile["PayloadContent"]]
+        pytest.fail(f"escrow override produced output with PayloadTypes {emitted}")
+    assert "cannot be converted" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("custom", "expected"),
+    [
+        ("com.apple.tcc.configuration-profile-policy", TCC),
+        (TCC, TCC),
+        ("com.microsoft.wdav", "com.microsoft.wdav"),
+        ("com.apple.TimeMachine", "com.apple.TimeMachine"),
+    ],
+)
+def test_payload_type_override_is_canonicalised(
+    tmp_path: Path, custom: str, expected: str
+) -> None:
+    profile = convert_with_override(tmp_path, custom)
+    assert [p["PayloadType"] for p in profile["PayloadContent"]] == [expected]
