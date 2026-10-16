@@ -49,7 +49,7 @@ just clean
 
 1. **Schema-driven conversion**: All setting resolution relies on the Graph API schema. Settings not in the schema are tracked and reported as missing.
 
-2. **PayloadType grouping**: Settings are grouped by their PayloadType (e.g., `com.microsoft.wdav`, `com.apple.SoftwareUpdate`). Each PayloadType becomes a separate inner payload.
+2. **PayloadType grouping**: Settings are grouped by their PayloadType (e.g., `com.microsoft.wdav`, `com.apple.SoftwareUpdate`). Each PayloadType becomes a separate inner payload. Apple types take their casing from `src/oib_converter/apple_payload_types.py`, Apple's own payload-type list. macOS matches PayloadType case-sensitively, and the lowercase `com.apple.tcc.configuration-profile-policy` was installed as a plain preferences domain rather than as TCC.
 
 3. **Nested settings**: Microsoft settings use parent_dict for nesting (e.g., `antivirusEngine/enforcementLevel`). Apple settings are flattened at the PayloadType root.
 

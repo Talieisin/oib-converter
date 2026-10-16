@@ -28,6 +28,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from oib_converter.apple_payload_types import canonical_apple_payload_type
+
 # Schema older than this triggers a warning
 SCHEMA_MAX_AGE_DAYS = 90
 
@@ -83,6 +85,18 @@ class SchemaError(Exception):
 
 class OutputCompatibilityError(Exception):
     """Raised when a setting cannot be represented by the requested output kind."""
+
+
+# Payload types that cannot be converted to a standalone mobileconfig: they
+# need Intune to inject additional data at deploy time. Keys are Apple's
+# spelling; every PayloadType the generator handles is canonicalised first.
+UNSUPPORTED_PAYLOAD_TYPES = {
+    'com.apple.security.FDERecoveryKeyEscrow': (
+        "FileVault Recovery Key Escrow requires EncryptCertPayloadUUID and a "
+        "certificate payload that Intune injects automatically at deploy time. "
+        "This payload cannot function as a standalone mobileconfig."
+    ),
+}
 
 
 def iter_setting_definition_ids(value: Any):
@@ -330,7 +344,9 @@ class GraphSchemaLoader:
             parent_path = None
 
             if len(parts) >= 2 and parts[0] == 'PayloadContent':
-                payload_type = parts[1]  # e.g., "com.microsoft.wdav"
+                # e.g., "com.microsoft.wdav". Apple types get Apple's casing;
+                # vendor types are not in Apple's list and pass through.
+                payload_type = canonical_apple_payload_type(parts[1])
 
             # Extract parent path (after mcx_preference_settings)
             if 'mcx_preference_settings' in base_uri:
@@ -370,38 +386,19 @@ class GraphSchemaLoader:
 
     def _normalize_apple_payload_type(self, domain: str) -> str:
         """
-        Normalise Apple domain to proper PayloadType format.
+        Normalise an Apple domain to Apple's PayloadType spelling.
 
-        Known mappings (Apple's actual PayloadType identifiers):
+        Settings-catalogue IDs are lowercase, but macOS matches PayloadType
+        case-sensitively, so the casing comes from Apple's own payload-type
+        list (see apple_payload_types). For example:
         - com.apple.softwareupdate -> com.apple.SoftwareUpdate
-        - com.apple.applicationaccess -> com.apple.applicationaccess (lowercase)
         - com.apple.mcx.filevault2 -> com.apple.MCX.FileVault2
-        - com.apple.security.firewall -> com.apple.security.firewall
-        - com.apple.loginwindow -> com.apple.loginwindow
-        - com.apple.screensaver -> com.apple.screensaver
+        - com.apple.tcc.configuration-profile-policy
+          -> com.apple.TCC.configuration-profile-policy
+        - com.apple.applicationaccess -> com.apple.applicationaccess (unchanged)
+        A domain that is not in Apple's list is returned as-is.
         """
-        # Known PayloadType mappings (domain -> actual PayloadType)
-        known_mappings = {
-            'com.apple.softwareupdate': 'com.apple.SoftwareUpdate',
-            'com.apple.mcx.filevault2': 'com.apple.MCX.FileVault2',
-            'com.apple.mcx': 'com.apple.MCX',
-            'com.apple.extensiblesso': 'com.apple.extensiblesso',
-            'com.apple.applicationaccess': 'com.apple.applicationaccess',
-            'com.apple.security.firewall': 'com.apple.security.firewall',
-            'com.apple.loginwindow': 'com.apple.loginwindow',
-            'com.apple.screensaver': 'com.apple.screensaver',
-            'com.apple.systempolicy.control': 'com.apple.systempolicy.control',
-            'com.apple.eas.account': 'com.apple.eas.account',
-            'com.apple.configurationprofile.identification': (
-                'com.apple.configurationprofile.identification'
-            ),
-        }
-
-        if domain in known_mappings:
-            return known_mappings[domain]
-
-        # Default: return as-is (most Apple domains are lowercase)
-        return domain
+        return canonical_apple_payload_type(domain)
 
     def get_payload_type(self, setting_id: str) -> str | None:
         """Get the correct PayloadType from schema baseUri"""
@@ -840,6 +837,19 @@ class MobileconfigGenerator:
             converted = self.converter.convert_setting_instance(setting_instance)
             converted_settings.append(converted)
 
+        # A payload_type override is typed by hand, so give an Apple type
+        # Apple's casing (vendor types pass through unchanged). An override
+        # naming an unsupported type fails the profile: skipping it would
+        # leave only the empty fallback payload, which would still carry the
+        # override as its PayloadType.
+        if custom_payload_type is not None:
+            custom_payload_type = canonical_apple_payload_type(custom_payload_type)
+            if custom_payload_type in UNSUPPORTED_PAYLOAD_TYPES:
+                raise OutputCompatibilityError(
+                    f"payload_type override {custom_payload_type} cannot be converted: "
+                    f"{UNSUPPORTED_PAYLOAD_TYPES[custom_payload_type]}"
+                )
+
         # Group settings by PayloadType
         # Structure: {payload_type: {"nested": {parent: {key: val}}, "root": {key: val}}}
         payloads_by_type: dict[str, dict[str, Any]] = {}
@@ -885,16 +895,6 @@ class MobileconfigGenerator:
                 # Root-level setting
                 payloads_by_type[pt]["root"][converted.key] = converted.value
 
-        # Payload types that cannot be converted to standalone mobileconfig
-        # These require Intune to inject additional data at deploy time
-        UNSUPPORTED_PAYLOAD_TYPES = {
-            'com.apple.security.fderecoverykeyescrow': (
-                "FileVault Recovery Key Escrow requires EncryptCertPayloadUUID and a "
-                "certificate payload that Intune injects automatically at deploy time. "
-                "This payload cannot function as a standalone mobileconfig."
-            ),
-        }
-
         # Build inner payloads for each PayloadType
         inner_payloads = []
         for payload_type, content in payloads_by_type.items():
@@ -902,7 +902,9 @@ class MobileconfigGenerator:
                 logger.warning("Settings with unknown PayloadType will be skipped")
                 continue
 
-            # Skip unsupported payload types that can't work standalone
+            # Skip unsupported payload types that can't work standalone.
+            # Derived types are already canonical, and an unsupported
+            # override was rejected above.
             if payload_type in UNSUPPORTED_PAYLOAD_TYPES:
                 reason = UNSUPPORTED_PAYLOAD_TYPES[payload_type]
                 logger.warning(f"Skipping {payload_type}: {reason}")
