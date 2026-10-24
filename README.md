@@ -4,7 +4,7 @@ Convert [OpenIntuneBaseline](https://github.com/SkipToTheEndpoint/OpenIntuneBase
 
 ## Features
 
-- Converts Microsoft Intune Settings Catalogue JSON to Apple mobileconfig XML
+- Converts Microsoft Intune Settings Catalog JSON to Apple mobileconfig XML
 - Uses Microsoft Graph API schema for accurate enumeration resolution
 - Batch conversion via YAML mapping file
 - Supports Microsoft Defender, Edge, Office, OneDrive, and system profiles
@@ -52,7 +52,11 @@ Run `just sync` before `just fetch-schema` — the fetcher uses `.venv`.
 
 The Graph API schema fetcher requires Azure AD credentials with read access to Intune configuration settings.
 
-### Option 1: Create a Dedicated App Registration (Recommended)
+A caller that already holds a suitable Graph token (for example CI signed in
+through OIDC) can pass it instead; see
+[Pre-acquired token](#pre-acquired-token-no-client-secret).
+
+### Option 1: Create a Dedicated App Registration
 
 1. Go to [Azure Portal > App Registrations](https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade)
 2. Click **New registration**
@@ -66,16 +70,27 @@ The Graph API schema fetcher requires Azure AD credentials with read access to I
    - Copy the **Value** (shown only once)
 5. Go to **API permissions** > **Add a permission** > **Microsoft Graph** > **Application permissions**
    - Add: `DeviceManagementConfiguration.Read.All`
-   - Add: `DeviceManagementManagedDevices.Read.All`
 6. Click **Grant admin consent for [your org]**
 
-### Option 2: Use Existing Credentials
+`DeviceManagementConfiguration.Read.All` is the only permission the fetcher
+needs. It calls one endpoint, `GET /beta/deviceManagement/configurationSettings`
+(with paging and retries), and Microsoft documents
+`DeviceManagementConfiguration.Read.All` as the least-privileged application
+permission for it. Earlier versions of this README also asked for
+`DeviceManagementManagedDevices.Read.All`; nothing here uses it.
 
-If you already have an Azure service principal with Intune access, use those credentials.
+### Option 2: An existing service principal
+
+Do not reuse an Intune admin or Terraform service principal. The fetcher only
+needs read access to one endpoint, and an admin service principal's secret
+would then sit in your local store with far more power than the fetch needs.
+If you use a service principal locally, make it a dedicated one with only
+`DeviceManagementConfiguration.Read.All`, as in Option 1.
 
 ### Configure Credentials
 
-Three variables are required: `CLIENT_ID`, `TENANT_ID` and `CLIENT_SECRET`.
+With a client secret (Options 1 and 2), three variables are required:
+`CLIENT_ID`, `TENANT_ID` and `CLIENT_SECRET`. A pre-acquired token needs none of them.
 `.env.example` is the key-only schema — it never contains values.
 
 **This repository is public.** None of the three belongs in a tracked file,
@@ -106,6 +121,44 @@ clone, so prefer one of the above):
 cp .env.example .env
 # Edit .env with your values
 ```
+
+### Pre-acquired token (no client secret)
+
+If `GRAPH_ACCESS_TOKEN` is exported, `fetch-graph-schema.sh` uses it as the
+Graph bearer token and skips `.env`, `CLIENT_ID` / `CLIENT_SECRET` /
+`TENANT_ID` and MSAL entirely, so the fetcher itself needs no client secret.
+
+It is for callers that already hold a Graph token with
+`DeviceManagementConfiguration.Read.All`. The typical case is CI that signs
+in a dedicated app registration through workload identity federation (GitHub
+OIDC to Entra, then `az account get-access-token --resource-type ms-graph`):
+
+```bash
+(
+  GRAPH_ACCESS_TOKEN=$(az account get-access-token --resource-type ms-graph --query accessToken -o tsv) &&
+  export GRAPH_ACCESS_TOKEN &&
+  ./scripts/fetch-graph-schema.sh
+)
+```
+
+The subshell keeps the token out of the calling shell, and the `&&` chain
+stops if `az` fails. Never type a literal token on the command line, where
+it would land in your shell history.
+
+A personal `az login` does **not** work here. That token belongs to the
+Azure CLI's own app, which is not granted any Intune (`DeviceManagement*`)
+scope, so Graph answers 403 and the fetcher stops with
+`Error fetching data: 403 Client Error: Forbidden for url: https://graph.microsoft.com/beta/deviceManagement/configurationSettings`.
+
+- It is read from the exported environment only. A `GRAPH_ACCESS_TOKEN` line
+  in `.env` is ignored, as is anything `.env` sets under the script's own
+  internal names.
+- The script reads and unsets the variable before it starts any other
+  process, never prints the value, and rejects anything that is not a bare
+  token (three base64url segments, no `Bearer ` prefix) without echoing it.
+- If `CLIENT_SECRET` is also exported, the token wins, a warning says
+  `CLIENT_SECRET` was ignored, and the script unsets `CLIENT_SECRET` so no
+  child process inherits it.
 
 ## Usage
 
@@ -246,7 +299,7 @@ mobileconfig-validator output/**/*.mobileconfig
 
 ### Inconsistent Setting IDs in Microsoft Graph API
 
-Some macOS `settingDefinitionId` values in the Intune Settings Catalogue are missing the `com.apple.` prefix (e.g., `loginwindow_loginwindow` instead of `com.apple.loginwindow_loginwindow`). This is a bug in the Microsoft Graph API, not this tool.
+Some macOS `settingDefinitionId` values in the Intune Settings Catalog are missing the `com.apple.` prefix (e.g., `loginwindow_loginwindow` instead of `com.apple.loginwindow_loginwindow`). This is a bug in the Microsoft Graph API, not this tool.
 
 We work around this by:
 1. Including additional keywords in our schema filter (`loginwindow`, `screensaver`)
@@ -277,7 +330,7 @@ just sync
 
 # Available commands
 just env-check       # Report which Azure credential names are unset (never values)
-just fetch-schema    # Fetch Graph API schema (requires Azure credentials)
+just fetch-schema    # Fetch Graph API schema (Azure credentials or GRAPH_ACCESS_TOKEN)
 just fetch-profiles  # Fetch OIB profiles from GitHub
 just convert         # Convert all profiles using mapping.yaml
 just lint            # Run linters (ruff, shellcheck)

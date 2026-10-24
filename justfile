@@ -13,6 +13,11 @@ sync:
 env-check:
     #!/usr/bin/env bash
     set -euo pipefail
+    if [ -n "${GRAPH_ACCESS_TOKEN:-}" ]; then
+        echo "env-check: OK — GRAPH_ACCESS_TOKEN is set; fetch-schema will use it and skip"
+        echo "the client-secret sign-in (CLIENT_ID, CLIENT_SECRET and TENANT_ID are ignored)."
+        exit 0
+    fi
     missing=""
     [ -n "${CLIENT_ID:-}" ]     || missing="$missing CLIENT_ID"
     [ -n "${CLIENT_SECRET:-}" ] || missing="$missing CLIENT_SECRET"
@@ -36,7 +41,7 @@ env-check:
     fi
     exit 1
 
-# Fetch Graph API schema (requires Azure credentials — see `just env-check`)
+# Fetch Graph API schema (GRAPH_ACCESS_TOKEN, or Azure credentials — see `just env-check`)
 fetch-schema:
     uv run ./scripts/fetch-graph-schema.sh
 

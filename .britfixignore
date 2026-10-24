@@ -1,0 +1,13 @@
+# Britfix ignore rules for this repo.
+#
+# britfix is a host-side auto-formatter that rewrites US spellings to UK ones.
+# Product names and established terms below keep their spelling.
+
+# Microsoft's product name for the Intune configuration surface.
+"Settings Catalog"
+
+# "artifact(s)" in the README's description of generated output.
+artifact*
+
+# "Authorization" — the HTTP request header name.
+Authorization

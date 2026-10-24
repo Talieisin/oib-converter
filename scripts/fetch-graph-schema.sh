@@ -22,6 +22,18 @@
 ##      cp .env.example .env
 ##      # Edit .env with your credentials
 ##
+##   4. Pre-acquired Graph access token, for callers that already hold one with
+##      DeviceManagementConfiguration.Read.All (e.g. CI signed in to a dedicated
+##      app through GitHub OIDC). A personal az login token does NOT work: the
+##      Azure CLI app has no Intune scopes, so Graph returns 403. Set it from
+##      the token source in a subshell; never type a literal token:
+##      ( GRAPH_ACCESS_TOKEN=$(az account get-access-token --resource-type ms-graph \
+##          --query accessToken -o tsv) && export GRAPH_ACCESS_TOKEN &&
+##        ./scripts/fetch-graph-schema.sh )
+##      Read from the exported environment only (never from .env). When it is
+##      set the script skips .env, CLIENT_ID/CLIENT_SECRET/TENANT_ID and MSAL.
+##      The token needs DeviceManagementConfiguration.Read.All.
+##
 ## Output: cache/graph-schema.json
 ##
 ## Frequency: Run quarterly or when adopting new OIB baseline versions
@@ -29,6 +41,17 @@
 ############################################################################################
 
 set -euo pipefail
+
+# A pre-acquired Graph access token (GRAPH_ACCESS_TOKEN) replaces the
+# client-secret sign-in. Capture it here, before the first child process
+# (dirname below), and unset it at once so no child inherits it. Only the
+# exported environment counts: .env is read later and cannot supply one. The
+# internal names that ever hold token material are unset first so that, if
+# the caller happened to export them, the values assigned here and later are
+# not exported. The value is never printed.
+unset SUPPLIED_TOKEN ACCESS_TOKEN TOKEN_RESPONSE SAFE_RESPONSE ERROR_MSG
+SUPPLIED_TOKEN="${GRAPH_ACCESS_TOKEN:-}"
+unset GRAPH_ACCESS_TOKEN
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -82,63 +105,91 @@ command -v jq >/dev/null 2>&1 || { log_error "jq is required but not installed. 
 # Create cache directory
 mkdir -p "${REPO_ROOT}/cache"
 
-# Load credentials from a tree-local .env if one exists.
-#
-# .env is strictly a FALLBACK: anything already exported (by direnv from
-# ~/.config/env/oib-converter.env, or by hand) wins. Sourcing alone would do the
-# opposite and let a stale tree-local file silently override the intended
-# credentials, so pre-existing values are captured first and restored after.
-if [[ -f "$ENV_FILE" ]]; then
-    log_info "Loading credentials from .env file (exported environment takes precedence)..."
-    exported_client_id="${CLIENT_ID:-}"
-    exported_client_secret="${CLIENT_SECRET:-}"
-    exported_tenant_id="${TENANT_ID:-}"
+# Token path (SUPPLIED_TOKEN was captured at the top) or client-secret path.
+if [[ -n "$SUPPLIED_TOKEN" ]]; then
+    # A JWS access token is three base64url segments. Anything else (a
+    # "Bearer " prefix, a JSON token response, a stray newline) is a caller
+    # mistake; say so without echoing the value.
+    if [[ ! "$SUPPLIED_TOKEN" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]]; then
+        log_error "GRAPH_ACCESS_TOKEN is set but is not a bare access token (expected three base64url segments; value not shown)"
+        exit 1
+    fi
+    log_info "Using the pre-acquired Graph access token from GRAPH_ACCESS_TOKEN (client-secret sign-in skipped)"
+    if [[ -n "${CLIENT_SECRET:-}" ]]; then
+        log_warn "CLIENT_SECRET is also set; it is ignored because GRAPH_ACCESS_TOKEN takes precedence"
+        # Not needed on this path, so no child process inherits it either.
+        unset CLIENT_SECRET
+    fi
+else
+    # Load credentials from a tree-local .env if one exists.
+    #
+    # .env is strictly a FALLBACK: anything already exported (by direnv from
+    # ~/.config/env/oib-converter.env, or by hand) wins. Sourcing alone would do the
+    # opposite and let a stale tree-local file silently override the intended
+    # credentials, so pre-existing values are captured first and restored after.
+    if [[ -f "$ENV_FILE" ]]; then
+        log_info "Loading credentials from .env file (exported environment takes precedence)..."
+        exported_client_id="${CLIENT_ID:-}"
+        exported_client_secret="${CLIENT_SECRET:-}"
+        exported_tenant_id="${TENANT_ID:-}"
 
-    set -a
-    # shellcheck disable=SC1090
-    source "$ENV_FILE"
-    set +a
+        set -a
+        # shellcheck disable=SC1090
+        source "$ENV_FILE"
+        set +a
 
-    # Restore whatever the environment already provided. Plain `if` blocks, not
-    # `[[ ... ]] && x=y`, so a false test cannot trip `set -e`.
-    if [[ -n "$exported_client_id" ]]; then
-        CLIENT_ID="$exported_client_id"
+        # Restore whatever the environment already provided. Plain `if` blocks, not
+        # `[[ ... ]] && x=y`, so a false test cannot trip `set -e`.
+        if [[ -n "$exported_client_id" ]]; then
+            CLIENT_ID="$exported_client_id"
+        fi
+        if [[ -n "$exported_client_secret" ]]; then
+            CLIENT_SECRET="$exported_client_secret"
+        fi
+        if [[ -n "$exported_tenant_id" ]]; then
+            TENANT_ID="$exported_tenant_id"
+        fi
+        unset exported_client_id exported_client_secret exported_tenant_id
+        # .env cannot choose the token path: the token comes from the exported
+        # environment only (captured at the top). Drop anything the file set
+        # under the public name or the internal ones that later hold token
+        # material (set -a would have exported them, and a later assignment
+        # keeps the export), and reset the token-path flag.
+        unset GRAPH_ACCESS_TOKEN SUPPLIED_TOKEN ACCESS_TOKEN TOKEN_RESPONSE SAFE_RESPONSE ERROR_MSG
+        SUPPLIED_TOKEN=""
     fi
-    if [[ -n "$exported_client_secret" ]]; then
-        CLIENT_SECRET="$exported_client_secret"
+
+    # Validate credentials
+    if [[ -z "${CLIENT_ID:-}" ]] || [[ -z "${CLIENT_SECRET:-}" ]] || [[ -z "${TENANT_ID:-}" ]]; then
+        log_error "Missing required credentials"
+        log_error ""
+        log_error "Run 'just env-check' to see exactly which names are unset."
+        log_error ""
+        log_error "Option 1 (preferred): encrypted store, loaded by .envrc"
+        log_error "  chezmoi edit ~/.config/env/oib-converter.env"
+        log_error "  direnv allow"
+        log_error ""
+        log_error "Option 2: Set environment variables:"
+        log_error "  export CLIENT_ID=your-app-id"
+        log_error "  export CLIENT_SECRET=your-secret"
+        log_error "  export TENANT_ID=your-tenant-id"
+        log_error ""
+        log_error "Option 3 (fallback): Create .env file from .env.example:"
+        log_error "  cp .env.example .env"
+        log_error "  # Edit .env with your Azure App Registration credentials"
+        log_error ""
+        log_error "Option 4 (no secret, e.g. CI via OIDC): export GRAPH_ACCESS_TOKEN with a"
+        log_error "  pre-acquired Graph token that has DeviceManagementConfiguration.Read.All"
+        log_error "  (a personal az login token does not work; see the header of this script)"
+        log_error ""
+        log_error "See README.md for creating an Azure App Registration"
+        exit 1
     fi
-    if [[ -n "$exported_tenant_id" ]]; then
-        TENANT_ID="$exported_tenant_id"
-    fi
-    unset exported_client_id exported_client_secret exported_tenant_id
+
+    log_info "Credentials loaded successfully"
+    log_info "Client ID: $(mask_id "$CLIENT_ID")"
+    log_info "Tenant ID: $(mask_id "$TENANT_ID")"
 fi
-
-# Validate credentials
-if [[ -z "${CLIENT_ID:-}" ]] || [[ -z "${CLIENT_SECRET:-}" ]] || [[ -z "${TENANT_ID:-}" ]]; then
-    log_error "Missing required credentials"
-    log_error ""
-    log_error "Run 'just env-check' to see exactly which names are unset."
-    log_error ""
-    log_error "Option 1 (preferred): encrypted store, loaded by .envrc"
-    log_error "  chezmoi edit ~/.config/env/oib-converter.env"
-    log_error "  direnv allow"
-    log_error ""
-    log_error "Option 2: Set environment variables:"
-    log_error "  export CLIENT_ID=your-app-id"
-    log_error "  export CLIENT_SECRET=your-secret"
-    log_error "  export TENANT_ID=your-tenant-id"
-    log_error ""
-    log_error "Option 3 (fallback): Create .env file from .env.example:"
-    log_error "  cp .env.example .env"
-    log_error "  # Edit .env with your Azure App Registration credentials"
-    log_error ""
-    log_error "See README.md for creating an Azure App Registration"
-    exit 1
-fi
-
-log_info "Credentials loaded successfully"
-log_info "Client ID: $(mask_id "$CLIENT_ID")"
-log_info "Tenant ID: $(mask_id "$TENANT_ID")"
 
 # Check for Python virtual environment
 VENV_PYTHON="${REPO_ROOT}/.venv/bin/python3"
@@ -149,19 +200,23 @@ if [[ ! -f "$VENV_PYTHON" ]]; then
     exit 1
 fi
 
-# Check for msal
-if ! "$VENV_PYTHON" -c "import msal" 2>/dev/null; then
-    log_error "MSAL not installed. Run: just sync"
-    log_error "Or manually: .venv/bin/pip install msal"
-    exit 1
-fi
+if [[ -n "$SUPPLIED_TOKEN" ]]; then
+    ACCESS_TOKEN="$SUPPLIED_TOKEN"
+else
+    # Check for msal
+    if ! "$VENV_PYTHON" -c "import msal" 2>/dev/null; then
+        log_error "MSAL not installed. Run: just sync"
+        log_error "Or manually: .venv/bin/pip install msal"
+        exit 1
+    fi
 
-# Authenticate with Microsoft Graph API
-log_info "Authenticating with Microsoft Graph API..."
+    # Authenticate with Microsoft Graph API
+    log_info "Authenticating with Microsoft Graph API..."
 
-# Pass credentials via environment variables to avoid shell injection
-TOKEN_RESPONSE=$(CLIENT_ID="$CLIENT_ID" CLIENT_SECRET="$CLIENT_SECRET" TENANT_ID="$TENANT_ID" \
-    "$VENV_PYTHON" <<'EOF'
+    # Pass credentials via environment variables to avoid shell injection.
+    # The heredoc body stays at column 0: it is Python.
+    TOKEN_RESPONSE=$(CLIENT_ID="$CLIENT_ID" CLIENT_SECRET="$CLIENT_SECRET" TENANT_ID="$TENANT_ID" \
+        "$VENV_PYTHON" <<'EOF'
 import os
 import sys
 import json
@@ -190,31 +245,33 @@ except Exception as e:
     print(json.dumps({"error": str(e)}))
     sys.exit(1)
 EOF
-)
+    )
 
-# Check for authentication errors
-if echo "$TOKEN_RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
-    ERROR_MSG=$(echo "$TOKEN_RESPONSE" | jq -r '.error_description // .error' | redact_guids)
-    log_error "Authentication failed: $ERROR_MSG"
-    exit 1
-fi
-
-ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.access_token')
-
-if [[ -z "$ACCESS_TOKEN" ]] || [[ "$ACCESS_TOKEN" == "null" ]]; then
-    log_error "Failed to obtain access token"
-    # Strip any token material before echoing the response, then redact GUIDs.
-    # If it will not parse as JSON it is not a token response, so say nothing
-    # about its contents rather than dumping an unknown blob.
-    if SAFE_RESPONSE=$(printf '%s' "$TOKEN_RESPONSE" | jq -c 'del(.access_token, .id_token, .refresh_token)' 2>/dev/null); then
-        log_error "Response: $(printf '%s' "$SAFE_RESPONSE" | redact_guids)"
-    else
-        log_error "Response was not valid JSON; omitted to avoid logging credential material."
+    # Check for authentication errors
+    if echo "$TOKEN_RESPONSE" | jq -e '.error' >/dev/null 2>&1; then
+        ERROR_MSG=$(echo "$TOKEN_RESPONSE" | jq -r '.error_description // .error' | redact_guids)
+        log_error "Authentication failed: $ERROR_MSG"
+        exit 1
     fi
-    exit 1
-fi
 
-log_info "Authentication successful"
+    ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.access_token')
+
+    if [[ -z "$ACCESS_TOKEN" ]] || [[ "$ACCESS_TOKEN" == "null" ]]; then
+        log_error "Failed to obtain access token"
+        # Strip any token material before echoing the response, then redact GUIDs.
+        # If it will not parse as JSON it is not a token response, so say nothing
+        # about its contents rather than dumping an unknown blob.
+        if SAFE_RESPONSE=$(printf '%s' "$TOKEN_RESPONSE" | jq -c 'del(.access_token, .id_token, .refresh_token)' 2>/dev/null); then
+            log_error "Response: $(printf '%s' "$SAFE_RESPONSE" | redact_guids)"
+        else
+            log_error "Response was not valid JSON; omitted to avoid logging credential material."
+        fi
+        exit 1
+    fi
+
+    log_info "Authentication successful"
+fi
+unset SUPPLIED_TOKEN
 
 # Fetch setting definitions from Graph API
 log_info "Fetching setting definitions from Microsoft Graph API..."
