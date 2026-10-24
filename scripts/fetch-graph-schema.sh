@@ -22,9 +22,14 @@
 ##      cp .env.example .env
 ##      # Edit .env with your credentials
 ##
-##   4. Pre-acquired Graph access token (CI with GitHub OIDC, no client secret):
-##      GRAPH_ACCESS_TOKEN=<app-only token for https://graph.microsoft.com> \
-##        ./scripts/fetch-graph-schema.sh
+##   4. Pre-acquired Graph access token, for callers that already hold one with
+##      DeviceManagementConfiguration.Read.All (e.g. CI signed in to a dedicated
+##      app through GitHub OIDC). A personal az login token does NOT work: the
+##      Azure CLI app has no Intune scopes, so Graph returns 403. Set it from
+##      the token source in a subshell; never type a literal token:
+##      ( GRAPH_ACCESS_TOKEN=$(az account get-access-token --resource-type ms-graph \
+##          --query accessToken -o tsv) && export GRAPH_ACCESS_TOKEN &&
+##        ./scripts/fetch-graph-schema.sh )
 ##      Read from the exported environment only (never from .env). When it is
 ##      set the script skips .env, CLIENT_ID/CLIENT_SECRET/TENANT_ID and MSAL.
 ##      The token needs DeviceManagementConfiguration.Read.All.
@@ -36,6 +41,17 @@
 ############################################################################################
 
 set -euo pipefail
+
+# A pre-acquired Graph access token (GRAPH_ACCESS_TOKEN) replaces the
+# client-secret sign-in. Capture it here, before the first child process
+# (dirname below), and unset it at once so no child inherits it. Only the
+# exported environment counts: .env is read later and cannot supply one. The
+# internal names are unset first so that, if the caller happened to export
+# them, the values assigned here and later are not exported. The value is
+# never printed.
+unset SUPPLIED_TOKEN ACCESS_TOKEN
+SUPPLIED_TOKEN="${GRAPH_ACCESS_TOKEN:-}"
+unset GRAPH_ACCESS_TOKEN
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -89,14 +105,7 @@ command -v jq >/dev/null 2>&1 || { log_error "jq is required but not installed. 
 # Create cache directory
 mkdir -p "${REPO_ROOT}/cache"
 
-# A pre-acquired Graph access token (GRAPH_ACCESS_TOKEN) replaces the
-# client-secret sign-in: CI gets one from GitHub OIDC and stores no secret.
-# Only the exported environment counts. It is captured before .env is read, so a
-# token can never come from a tree-local file, and the variable is unset at once
-# so no child process inherits it. The value is never printed.
-SUPPLIED_TOKEN="${GRAPH_ACCESS_TOKEN:-}"
-unset GRAPH_ACCESS_TOKEN
-
+# Token path (SUPPLIED_TOKEN was captured at the top) or client-secret path.
 if [[ -n "$SUPPLIED_TOKEN" ]]; then
     # A JWS access token is three base64url segments. Anything else (a
     # "Bearer " prefix, a JSON token response, a stray newline) is a caller
@@ -108,6 +117,8 @@ if [[ -n "$SUPPLIED_TOKEN" ]]; then
     log_info "Using the pre-acquired Graph access token from GRAPH_ACCESS_TOKEN (client-secret sign-in skipped)"
     if [[ -n "${CLIENT_SECRET:-}" ]]; then
         log_warn "CLIENT_SECRET is also set; it is ignored because GRAPH_ACCESS_TOKEN takes precedence"
+        # Not needed on this path, so no child process inherits it either.
+        unset CLIENT_SECRET
     fi
 else
     # Load credentials from a tree-local .env if one exists.
@@ -139,8 +150,12 @@ else
             TENANT_ID="$exported_tenant_id"
         fi
         unset exported_client_id exported_client_secret exported_tenant_id
-        # A token in .env is not honoured (see above); do not leave it exported.
-        unset GRAPH_ACCESS_TOKEN
+        # .env cannot choose the token path: the token comes from the exported
+        # environment only (captured at the top). Drop anything the file set
+        # under the public name or the internal ones, which set -a would also
+        # have exported, and reset the token-path flag.
+        unset GRAPH_ACCESS_TOKEN SUPPLIED_TOKEN ACCESS_TOKEN
+        SUPPLIED_TOKEN=""
     fi
 
     # Validate credentials
@@ -162,8 +177,9 @@ else
         log_error "  cp .env.example .env"
         log_error "  # Edit .env with your Azure App Registration credentials"
         log_error ""
-        log_error "Option 4 (CI): export GRAPH_ACCESS_TOKEN with a pre-acquired app-only"
-        log_error "  Graph token (for example from GitHub OIDC); no client secret needed"
+        log_error "Option 4 (no secret, e.g. CI via OIDC): export GRAPH_ACCESS_TOKEN with a"
+        log_error "  pre-acquired Graph token that has DeviceManagementConfiguration.Read.All"
+        log_error "  (a personal az login token does not work; see the header of this script)"
         log_error ""
         log_error "See README.md for creating an Azure App Registration"
         exit 1

@@ -41,7 +41,7 @@ env-check:
     fi
     exit 1
 
-# Fetch Graph API schema (requires Azure credentials — see `just env-check`)
+# Fetch Graph API schema (GRAPH_ACCESS_TOKEN, or Azure credentials — see `just env-check`)
 fetch-schema:
     uv run ./scripts/fetch-graph-schema.sh
 

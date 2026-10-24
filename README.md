@@ -10,11 +10,11 @@ Convert [OpenIntuneBaseline](https://github.com/SkipToTheEndpoint/OpenIntuneBase
 - Supports Microsoft Defender, Edge, Office, OneDrive, and system profiles
 - Handles nested settings (antivirusEngine, cloudService, etc.)
 - Converts string booleans to proper XML boolean types
-- Emits reviewed Settings Catalogue/DDM JSON through explicit semantic migrations
+- Emits reviewed Settings Catalog/DDM JSON through explicit semantic migrations
 - Rejects DDM-only settings from mobileconfig output
 
 Mappings use `output_kind: settings_catalog_json` plus a named `migration` for
-DDM artefacts. Generated JSON contains stable policy metadata and raw setting
+DDM artifacts. Generated JSON contains stable policy metadata and raw setting
 instances; callers encode each instance for the Terraform provider. A raw JSON
 copy is deliberately unsupported because changing deployment technology can
 also change setting semantics.
@@ -52,7 +52,11 @@ Run `just sync` before `just fetch-schema` — the fetcher uses `.venv`.
 
 The Graph API schema fetcher requires Azure AD credentials with read access to Intune configuration settings.
 
-### Option 1: Create a Dedicated App Registration (Recommended)
+A caller that already holds a suitable Graph token (for example CI signed in
+through OIDC) can pass it instead; see
+[Pre-acquired token](#pre-acquired-token-no-client-secret).
+
+### Option 1: Create a Dedicated App Registration
 
 1. Go to [Azure Portal > App Registrations](https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade)
 2. Click **New registration**
@@ -69,19 +73,24 @@ The Graph API schema fetcher requires Azure AD credentials with read access to I
 6. Click **Grant admin consent for [your org]**
 
 `DeviceManagementConfiguration.Read.All` is the only permission the fetcher
-needs. It makes one Graph request,
-`GET /beta/deviceManagement/configurationSettings` (following any
-`@odata.nextLink`), and Microsoft documents `DeviceManagementConfiguration.Read.All`
-as the least-privileged application permission for it. Earlier versions of this
-README also asked for `DeviceManagementManagedDevices.Read.All`; nothing here uses it.
+needs. It calls one endpoint, `GET /beta/deviceManagement/configurationSettings`
+(with paging and retries), and Microsoft documents
+`DeviceManagementConfiguration.Read.All` as the least-privileged application
+permission for it. Earlier versions of this README also asked for
+`DeviceManagementManagedDevices.Read.All`; nothing here uses it.
 
-### Option 2: Use Existing Credentials
+### Option 2: An existing service principal
 
-If you already have an Azure service principal with Intune access, use those credentials.
+Do not reuse an Intune admin or Terraform service principal. The fetcher only
+needs read access to one endpoint, and an admin service principal's secret
+would then sit in your local store with far more power than the fetch needs.
+If you use a service principal locally, make it a dedicated one with only
+`DeviceManagementConfiguration.Read.All`, as in Option 1.
 
 ### Configure Credentials
 
-Three variables are required: `CLIENT_ID`, `TENANT_ID` and `CLIENT_SECRET`.
+With a client secret (Options 1 and 2), three variables are required:
+`CLIENT_ID`, `TENANT_ID` and `CLIENT_SECRET`. A pre-acquired token needs none of them.
 `.env.example` is the key-only schema — it never contains values.
 
 **This repository is public.** None of the three belongs in a tracked file,
@@ -113,23 +122,43 @@ cp .env.example .env
 # Edit .env with your values
 ```
 
-### Pre-acquired token (CI, no client secret)
+### Pre-acquired token (no client secret)
 
 If `GRAPH_ACCESS_TOKEN` is exported, `fetch-graph-schema.sh` uses it as the
 Graph bearer token and skips `.env`, `CLIENT_ID` / `CLIENT_SECRET` /
-`TENANT_ID` and MSAL entirely. This is for CI that signs in with workload
-identity federation (for example GitHub OIDC to Entra, then
-`az account get-access-token --resource-type ms-graph`), so no client secret is
-stored anywhere. The token must be an app-only Microsoft Graph token whose
-identity has `DeviceManagementConfiguration.Read.All`.
+`TENANT_ID` and MSAL entirely, so the fetcher itself needs no client secret.
+
+It is for callers that already hold a Graph token with
+`DeviceManagementConfiguration.Read.All`. The typical case is CI that signs
+in a dedicated app registration through workload identity federation (GitHub
+OIDC to Entra, then `az account get-access-token --resource-type ms-graph`):
+
+```bash
+(
+  GRAPH_ACCESS_TOKEN=$(az account get-access-token --resource-type ms-graph --query accessToken -o tsv) &&
+  export GRAPH_ACCESS_TOKEN &&
+  ./scripts/fetch-graph-schema.sh
+)
+```
+
+The subshell keeps the token out of the calling shell, and the `&&` chain
+stops if `az` fails. Never type a literal token on the command line, where
+it would land in your shell history.
+
+A personal `az login` does **not** work here. That token belongs to the
+Azure CLI's own app, which is not granted any Intune (`DeviceManagement*`)
+scope, so Graph answers 403 and the fetcher stops with
+`Error fetching data: 403 Error`.
 
 - It is read from the exported environment only. A `GRAPH_ACCESS_TOKEN` line
-  in `.env` is ignored.
-- The script unsets the variable as soon as it has read it, never prints the
-  value, and rejects anything that is not a bare token (three base64url
-  segments, no `Bearer ` prefix) without echoing it.
-- If both are present, the token wins and a warning says `CLIENT_SECRET` was
-  ignored.
+  in `.env` is ignored, as is anything `.env` sets under the script's own
+  internal names.
+- The script reads and unsets the variable before it starts any other
+  process, never prints the value, and rejects anything that is not a bare
+  token (three base64url segments, no `Bearer ` prefix) without echoing it.
+- If `CLIENT_SECRET` is also exported, the token wins, a warning says
+  `CLIENT_SECRET` was ignored, and the script unsets `CLIENT_SECRET` so no
+  child process inherits it.
 
 ## Usage
 
@@ -159,7 +188,7 @@ output/
 ```
 
 The batch is intentionally multi-format. The current mapping emits 17
-mobileconfig files and one reviewed Settings Catalogue/DDM JSON artefact for
+mobileconfig files and one reviewed Settings Catalog/DDM JSON artifact for
 software-update settings. Conversion is not assumed to be lossless across
 deployment technologies: the named migration verifies every legacy source
 control, validates generated setting and choice IDs against the fetched Graph
