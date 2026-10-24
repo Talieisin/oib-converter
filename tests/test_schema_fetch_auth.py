@@ -98,12 +98,15 @@ def get(url, headers=None, timeout=None):
 
 # Every external command the script starts goes through a wrapper that records
 # which environment variables hold the watched value (FAKE_WATCH), so a test can
-# prove a secret reached no child process. ACCESS_TOKEN is excluded only for the
-# Python children: the script hands the token to the Graph fetch that way on
-# purpose, and the Authorization assertions cover it.
+# prove a secret reached no child process. The harness's own FAKE_* variables
+# are excluded (FAKE_MSAL_TOKEN carries the MSAL token value by design), and
+# ACCESS_TOKEN is excluded only for the Python children: the script hands the
+# token to the Graph fetch that way on purpose, and the Authorization
+# assertions cover it. test_child_env_wrapper_detects_a_real_leak is the
+# positive control.
 CHILD_WRAPPER = """#!/bin/sh
 if [ -n "${{FAKE_WATCH:-}}" ]; then
-  /usr/bin/env | /usr/bin/grep -F -e "$FAKE_WATCH" | /usr/bin/grep -v -e '^FAKE_WATCH='{extra} \\
+  /usr/bin/env | /usr/bin/grep -F -e "$FAKE_WATCH" | /usr/bin/grep -v -e '^FAKE_[A-Z_]*='{extra} \\
     | /usr/bin/cut -d= -f1 | /usr/bin/sed 's/^/{name}:/' >> "$FAKE_CHILD_LOG"
 fi
 exec "{real}" "$@"
@@ -161,8 +164,10 @@ def sandbox(tmp_path):
     _write_wrapper(path_bin / "jq", "jq", jq)
     for tool in WRAPPED_TOOLS:
         real = shutil.which(tool, path="/usr/bin:/bin")
-        if real is not None:
-            _write_wrapper(path_bin / tool, tool, real)
+        if real is None:
+            # An unwrapped tool would make the leak tests pass vacuously.
+            pytest.fail(f"{tool} not found in /usr/bin or /bin; cannot wrap it")
+        _write_wrapper(path_bin / tool, tool, real)
 
     msal_log = tmp_path / "msal.log"
     requests_log = tmp_path / "requests.log"
@@ -329,6 +334,48 @@ def test_exported_internal_names_are_ignored(sandbox):
     assert [call["authorization"] for call in result["graph"]] == [f"Bearer {MSAL_TOKEN}"]
     assert ENV_FILE_TOKEN not in result["output"]
     assert result["children"] == []
+
+
+def test_child_env_wrapper_detects_a_real_leak(sandbox):
+    # Positive control for the empty-children assertions above: on the
+    # client-secret path the caller-exported CLIENT_SECRET is legitimately in
+    # every child's environment, and the wrappers must report it, including
+    # for a shell tool and for the Python children.
+    result = sandbox(
+        {
+            "CLIENT_ID": CLIENT_ID,
+            "CLIENT_SECRET": CLIENT_SECRET,
+            "TENANT_ID": TENANT_ID,
+            "FAKE_WATCH": CLIENT_SECRET,
+        }
+    )
+
+    assert result["code"] == 0, result["output"]
+    assert "dirname:CLIENT_SECRET" in result["children"]
+    assert "jq:CLIENT_SECRET" in result["children"]
+    assert "python3:CLIENT_SECRET" in result["children"]
+
+
+TOKEN_HOLDING_NAMES = ("TOKEN_RESPONSE", "SAFE_RESPONSE", "ERROR_MSG")
+
+
+@pytest.mark.parametrize("source", ["env_file", "exported"])
+def test_msal_token_reaches_no_child_via_preset_internal_names(sandbox, source):
+    # TOKEN_RESPONSE holds the MSAL response (the token included). If .env or
+    # the caller had exported it, the later assignment would keep the export
+    # and hand the token to jq, du and the Graph fetch child.
+    creds = {"CLIENT_ID": CLIENT_ID, "CLIENT_SECRET": CLIENT_SECRET, "TENANT_ID": TENANT_ID}
+    preset = dict.fromkeys(TOKEN_HOLDING_NAMES, "preset-by-" + source)
+    if source == "env_file":
+        env_file = "".join(f"{key}={value}\n" for key, value in {**creds, **preset}.items())
+        result = sandbox({"FAKE_WATCH": MSAL_TOKEN}, env_file=env_file)
+    else:
+        result = sandbox({**creds, **preset, "FAKE_WATCH": MSAL_TOKEN})
+
+    assert result["code"] == 0, result["output"]
+    assert [call["authorization"] for call in result["graph"]] == [f"Bearer {MSAL_TOKEN}"]
+    assert result["children"] == []
+    assert MSAL_TOKEN not in result["output"]
 
 
 @pytest.mark.parametrize(

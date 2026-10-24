@@ -4,7 +4,7 @@ Convert [OpenIntuneBaseline](https://github.com/SkipToTheEndpoint/OpenIntuneBase
 
 ## Features
 
-- Converts Microsoft Intune Settings Catalogue JSON to Apple mobileconfig XML
+- Converts Microsoft Intune Settings Catalog JSON to Apple mobileconfig XML
 - Uses Microsoft Graph API schema for accurate enumeration resolution
 - Batch conversion via YAML mapping file
 - Supports Microsoft Defender, Edge, Office, OneDrive, and system profiles
@@ -148,7 +148,7 @@ it would land in your shell history.
 A personal `az login` does **not** work here. That token belongs to the
 Azure CLI's own app, which is not granted any Intune (`DeviceManagement*`)
 scope, so Graph answers 403 and the fetcher stops with
-`Error fetching data: 403 Error`.
+`Error fetching data: 403 Client Error: Forbidden for url: https://graph.microsoft.com/beta/deviceManagement/configurationSettings`.
 
 - It is read from the exported environment only. A `GRAPH_ACCESS_TOKEN` line
   in `.env` is ignored, as is anything `.env` sets under the script's own
@@ -299,7 +299,7 @@ mobileconfig-validator output/**/*.mobileconfig
 
 ### Inconsistent Setting IDs in Microsoft Graph API
 
-Some macOS `settingDefinitionId` values in the Intune Settings Catalogue are missing the `com.apple.` prefix (e.g., `loginwindow_loginwindow` instead of `com.apple.loginwindow_loginwindow`). This is a bug in the Microsoft Graph API, not this tool.
+Some macOS `settingDefinitionId` values in the Intune Settings Catalog are missing the `com.apple.` prefix (e.g., `loginwindow_loginwindow` instead of `com.apple.loginwindow_loginwindow`). This is a bug in the Microsoft Graph API, not this tool.
 
 We work around this by:
 1. Including additional keywords in our schema filter (`loginwindow`, `screensaver`)

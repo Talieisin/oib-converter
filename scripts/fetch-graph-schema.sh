@@ -46,10 +46,10 @@ set -euo pipefail
 # client-secret sign-in. Capture it here, before the first child process
 # (dirname below), and unset it at once so no child inherits it. Only the
 # exported environment counts: .env is read later and cannot supply one. The
-# internal names are unset first so that, if the caller happened to export
-# them, the values assigned here and later are not exported. The value is
-# never printed.
-unset SUPPLIED_TOKEN ACCESS_TOKEN
+# internal names that ever hold token material are unset first so that, if
+# the caller happened to export them, the values assigned here and later are
+# not exported. The value is never printed.
+unset SUPPLIED_TOKEN ACCESS_TOKEN TOKEN_RESPONSE SAFE_RESPONSE ERROR_MSG
 SUPPLIED_TOKEN="${GRAPH_ACCESS_TOKEN:-}"
 unset GRAPH_ACCESS_TOKEN
 
@@ -152,9 +152,10 @@ else
         unset exported_client_id exported_client_secret exported_tenant_id
         # .env cannot choose the token path: the token comes from the exported
         # environment only (captured at the top). Drop anything the file set
-        # under the public name or the internal ones, which set -a would also
-        # have exported, and reset the token-path flag.
-        unset GRAPH_ACCESS_TOKEN SUPPLIED_TOKEN ACCESS_TOKEN
+        # under the public name or the internal ones that later hold token
+        # material (set -a would have exported them, and a later assignment
+        # keeps the export), and reset the token-path flag.
+        unset GRAPH_ACCESS_TOKEN SUPPLIED_TOKEN ACCESS_TOKEN TOKEN_RESPONSE SAFE_RESPONSE ERROR_MSG
         SUPPLIED_TOKEN=""
     fi
 
