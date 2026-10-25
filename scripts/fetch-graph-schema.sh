@@ -8,11 +8,15 @@
 ## This cache is used by the OIB converter to resolve enumeration values accurately.
 ##
 ## Credentials are read from the environment, with a tree-local .env fallback.
+## The token needs DeviceManagementConfiguration.Read.All and nothing more. The
+## client-secret options (1-3) are for a DEDICATED read-only app registration
+## only; never the Terraform or an Intune admin service principal. CI uses
+## option 4 (GitHub OIDC as "Talieisin - OIB schema reader", no secret).
 ##
 ## Usage:
-##   1. Preferred — encrypted store + direnv (nothing lands in the repo):
-##      chezmoi edit ~/.config/env/oib-converter.env
-##      direnv allow          # .envrc loads the store on cd
+##   1. Encrypted store + direnv (nothing lands in the repo):
+##      chezmoi edit ~/.config/env/oib-schema-reader.env
+##      direnv allow          # .envrc loads the store on cd, if it exists
 ##      ./scripts/fetch-graph-schema.sh
 ##
 ##   2. With environment variables:
@@ -25,7 +29,8 @@
 ##   4. Pre-acquired Graph access token, for callers that already hold one with
 ##      DeviceManagementConfiguration.Read.All (e.g. CI signed in to a dedicated
 ##      app through GitHub OIDC). A personal az login token does NOT work: the
-##      Azure CLI app has no Intune scopes, so Graph returns 403. Set it from
+##      Azure CLI app has no Intune scopes, so Graph returns 403 (tested
+##      2026-10-24). The az example below needs az signed in as such an app. Set it from
 ##      the token source in a subshell; never type a literal token:
 ##      ( GRAPH_ACCESS_TOKEN=$(az account get-access-token --resource-type ms-graph \
 ##          --query accessToken -o tsv) && export GRAPH_ACCESS_TOKEN &&
@@ -124,7 +129,7 @@ else
     # Load credentials from a tree-local .env if one exists.
     #
     # .env is strictly a FALLBACK: anything already exported (by direnv from
-    # ~/.config/env/oib-converter.env, or by hand) wins. Sourcing alone would do the
+    # ~/.config/env/oib-schema-reader.env, or by hand) wins. Sourcing alone would do the
     # opposite and let a stale tree-local file silently override the intended
     # credentials, so pre-existing values are captured first and restored after.
     if [[ -f "$ENV_FILE" ]]; then
@@ -165,8 +170,12 @@ else
         log_error ""
         log_error "Run 'just env-check' to see exactly which names are unset."
         log_error ""
-        log_error "Option 1 (preferred): encrypted store, loaded by .envrc"
-        log_error "  chezmoi edit ~/.config/env/oib-converter.env"
+        log_error "Options 1-3 take a DEDICATED read-only app registration's credentials"
+        log_error "(DeviceManagementConfiguration.Read.All only); never the Terraform or an"
+        log_error "Intune admin service principal."
+        log_error ""
+        log_error "Option 1: encrypted store, loaded by .envrc"
+        log_error "  chezmoi edit ~/.config/env/oib-schema-reader.env"
         log_error "  direnv allow"
         log_error ""
         log_error "Option 2: Set environment variables:"
@@ -178,7 +187,7 @@ else
         log_error "  cp .env.example .env"
         log_error "  # Edit .env with your Azure App Registration credentials"
         log_error ""
-        log_error "Option 4 (no secret, e.g. CI via OIDC): export GRAPH_ACCESS_TOKEN with a"
+        log_error "Option 4 (preferred, no secret; CI uses it via OIDC): export GRAPH_ACCESS_TOKEN with a"
         log_error "  pre-acquired Graph token that has DeviceManagementConfiguration.Read.All"
         log_error "  (a personal az login token does not work; see the header of this script)"
         log_error ""
