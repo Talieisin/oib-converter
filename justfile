@@ -31,9 +31,12 @@ env-check:
         echo "  - $name"
     done
     echo
-    echo "Supply them from your encrypted store:"
-    echo "  chezmoi edit ~/.config/env/oib-converter.env   # then: direnv allow"
-    echo "See .env.example for the key schema."
+    echo "Either export GRAPH_ACCESS_TOKEN (a Graph token with"
+    echo "DeviceManagementConfiguration.Read.All; a personal az login token gets 403),"
+    echo "or supply a DEDICATED read-only app's credentials from your encrypted store:"
+    echo "  chezmoi edit ~/.config/env/oib-schema-reader.env   # then: direnv allow"
+    echo "Never use the Terraform or an Intune admin service principal."
+    echo "See README.md and .env.example for the key schema."
     if [ -f .env ]; then
         echo
         echo "Note: a tree-local .env exists and fetch-schema still reads it as a"

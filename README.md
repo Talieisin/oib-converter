@@ -32,10 +32,10 @@ cd oib-converter
 
 # 3. Trust the project tooling (one-time)
 mise trust    # accepts mise.toml — pins Python 3.12
-direnv allow  # accepts .envrc — loads your Azure credentials from your store
+direnv allow  # accepts .envrc — loads an optional reader-credentials file
 
-# 4. Supply Azure credentials (see "Azure Credential Setup" below)
-just env-check  # reports which of the three names are still unset
+# 4. Supply a Graph token or reader credentials (see "Azure Credential Setup")
+just env-check  # reports what is set and what is missing (names only)
 
 # 5. Sync dependencies, fetch the schema, convert
 just sync
@@ -43,18 +43,31 @@ just fetch-schema
 just convert
 ```
 
-A fresh clone needs no file copying: `.envrc` reads your credentials from
-`~/.config/env/oib-converter.env`, and `just fetch-schema` regenerates
+A fresh clone needs no file copying: credentials come from the environment
+(see below), and `just fetch-schema` regenerates
 `cache/graph-schema.json` (~37 MB, git-ignored, required by every conversion).
 Run `just sync` before `just fetch-schema` — the fetcher uses `.venv`.
 
 ## Azure Credential Setup
 
-The Graph API schema fetcher requires Azure AD credentials with read access to Intune configuration settings.
+The Graph API schema fetcher needs a Microsoft Graph token with
+`DeviceManagementConfiguration.Read.All`, and nothing more. There are two
+ways to give it one:
 
-A caller that already holds a suitable Graph token (for example CI signed in
-through OIDC) can pass it instead; see
-[Pre-acquired token](#pre-acquired-token-no-client-secret).
+- **A pre-acquired token in `GRAPH_ACCESS_TOKEN`** (preferred; no client
+  secret). Talieisin's CI does this: the OIB drift check in
+  `Talieisin/macos-intune` (`.github/workflows/oib-sync-check.yml`) signs in
+  with GitHub OIDC as the read-only app "Talieisin - OIB schema reader" and
+  passes its token as `GRAPH_ACCESS_TOKEN`. A local run works the same way
+  with any token that carries that permission; see
+  [Pre-acquired token](#pre-acquired-token-no-client-secret). A personal
+  `az login` token is **not** a substitute: Graph answers 403 on the Intune
+  endpoints (tested 2026-10-24).
+- **A dedicated read-only app registration** with a client secret
+  (`CLIENT_ID`, `CLIENT_SECRET`, `TENANT_ID`), set up as in Option 1 below.
+
+Never use the Terraform admin service principal, or any Intune admin
+service principal, for either path.
 
 ### Option 1: Create a Dedicated App Registration
 
@@ -90,7 +103,8 @@ If you use a service principal locally, make it a dedicated one with only
 ### Configure Credentials
 
 With a client secret (Options 1 and 2), three variables are required:
-`CLIENT_ID`, `TENANT_ID` and `CLIENT_SECRET`. A pre-acquired token needs none of them.
+`CLIENT_ID`, `TENANT_ID` and `CLIENT_SECRET`, all for a dedicated read-only
+app. A pre-acquired token needs none of them.
 `.env.example` is the key-only schema — it never contains values.
 
 **This repository is public.** None of the three belongs in a tracked file,
@@ -99,12 +113,13 @@ including the tenant and client IDs.
 **Preferred — encrypted store (survives a fresh clone, nothing in the repo):**
 
 ```bash
-chezmoi edit ~/.config/env/oib-converter.env  # age-encrypted in your dotfiles
-direnv allow                                  # one-time, per checkout
-just env-check                                # confirms all three are set
+chezmoi edit ~/.config/env/oib-schema-reader.env  # age-encrypted in your dotfiles
+direnv allow                                      # one-time, per checkout
+just env-check                                    # confirms all three are set
 ```
 
-`.envrc` loads that file automatically whenever you `cd` into the project.
+`.envrc` loads that file, if it exists, whenever you `cd` into the project.
+It is only for a dedicated reader app's credentials.
 
 **Alternative — export in your shell:**
 
@@ -145,7 +160,8 @@ The subshell keeps the token out of the calling shell, and the `&&` chain
 stops if `az` fails. Never type a literal token on the command line, where
 it would land in your shell history.
 
-A personal `az login` does **not** work here. That token belongs to the
+Run that only where `az` is signed in as such an app (in CI, after an OIDC
+sign-in). A personal `az login` does **not** work here (tested 2026-10-24). That token belongs to the
 Azure CLI's own app, which is not granted any Intune (`DeviceManagement*`)
 scope, so Graph answers 403 and the fetcher stops with
 `Error fetching data: 403 Client Error: Forbidden for url: https://graph.microsoft.com/beta/deviceManagement/configurationSettings`.
