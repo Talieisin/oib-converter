@@ -110,7 +110,7 @@ app. A pre-acquired token needs none of them.
 **This repository is public.** None of the three belongs in a tracked file,
 including the tenant and client IDs.
 
-**Preferred — encrypted store (survives a fresh clone, nothing in the repo):**
+**Encrypted store (the best of the client-secret methods: survives a fresh clone, nothing in the repo):**
 
 ```bash
 chezmoi edit ~/.config/env/oib-schema-reader.env  # age-encrypted in your dotfiles
@@ -331,7 +331,7 @@ This project uses [uv](https://docs.astral.sh/uv/) for dependency management and
 [mise](https://mise.jdx.dev/) pins the Python runtime (`mise.toml`, currently
 3.12 — the highest version CI exercises); `uv`, `just`, `jq` and `shellcheck`
 are Homebrew-owned and deliberately absent from `mise.toml`.
-[direnv](https://direnv.net/) loads credentials via `.envrc` — secrets only, no
+[direnv](https://direnv.net/) loads optional reader credentials via `.envrc` — secrets only, no
 PATH or layout directives, so the two layers stay disjoint.
 
 Note that `just clean` deletes `cache/graph-schema.json`; rebuild it with
