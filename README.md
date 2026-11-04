@@ -196,29 +196,51 @@ output/
 │   └── mde-config.mobileconfig
 ├── system/
 │   ├── device-restrictions.mobileconfig
-│   ├── filevault.mobileconfig
+│   ├── filevault.settings.json
+│   ├── software-updates.mobileconfig
+│   ├── software-updates.settings.json
 │   └── ...
 ├── edge/
 │   └── ...
 └── ...
 ```
 
-The batch is intentionally multi-format. The current mapping emits 17
-mobileconfig files and one reviewed Settings Catalog/DDM JSON artifact for
-software-update settings. Conversion is not assumed to be lossless across
-deployment technologies: the named migration verifies every legacy source
-control, validates generated setting and choice IDs against the fetched Graph
-schema, and fails on unsupported source changes. It reconstructs the three OS/security
-update controls; it is not a generic Graph JSON passthrough or raw Apple declaration
-exporter. `source_coverage` records controls that are superseded or need separate
-management. In particular, the global App Store auto-update preference has no
-replacement here: manage app updates independently and review that coverage before
-retiring the legacy payload.
+The batch is intentionally multi-format. The current mapping emits 16
+mobileconfig files and two reviewed Settings Catalog JSON artifacts, each
+produced by a named migration:
 
-Use `output_kind: settings_catalog_json`, `migration: macos27_software_update`,
-and a `.settings.json` output path together. The default `mobileconfig` kind
-requires a `.mobileconfig` path and rejects migration options. Enum choices are
-resolved from their Apple values and parent in the cached Graph schema.
+- `macos27_software_update` (`system/software-updates.settings.json`,
+  technologies `appleRemoteManagement`) reconstructs the three OS/security
+  update controls as Apple's DDM software-update declaration. Conversion is
+  not assumed to be lossless across deployment technologies: the migration
+  verifies every legacy source control and fails on unsupported source
+  changes. It is not a generic Graph JSON passthrough or raw Apple declaration
+  exporter. `source_coverage` records controls that are superseded or need
+  separate management. In particular, the global App Store auto-update
+  preference has no replacement here: manage app updates independently and
+  review that coverage before retiring the legacy payload.
+- `filevault_escrow` (`system/filevault.settings.json`, technologies
+  `mdm,appleRemoteManagement`) carries OIB's FileVault policy verbatim as a
+  native Settings Catalog policy. A converted mobileconfig cannot escrow the
+  personal recovery key, because `com.apple.security.FDERecoveryKeyEscrow`
+  needs the certificate Intune injects at deploy time; a Settings Catalog
+  policy gets it. The migration keeps OIB's three setting groups (FileVault
+  on, forced in Setup Assistant, key rotation every 6 months; FileVault
+  cannot be turned off; escrow with OIB's location text) and removes only
+  Graph read-back metadata (`id`, `@odata.context`, null template
+  references). It adds nothing: `source_coverage` records that `Defer`, which
+  Microsoft's FileVault guidance recommends, is left to the consuming
+  repository. Any added, removed, moved or re-valued setting fails the
+  conversion; only the escrow location text may change.
+
+Use `output_kind: settings_catalog_json`, a named `migration`, and a
+`.settings.json` output path together. The default `mobileconfig` kind
+requires a `.mobileconfig` path and rejects migration options. Every artifact
+is validated against the cached Graph schema: setting IDs must exist, choice
+values must be listed options, and each setting must be available through one
+of the artifact's own technologies (so a DDM-only artifact still rejects an
+MDM-only setting). The software-update migration resolves enum choices from
+their Apple values and parent.
 
 ### Single File Conversion
 
@@ -301,7 +323,11 @@ mobileconfig-validator output/**/*.mobileconfig
 
 ## Limitations
 
-- **FileVault Recovery Key Escrow**: Requires Intune-injected certificates, cannot be converted to standalone mobileconfig
+- **FileVault Recovery Key Escrow**: Requires Intune-injected certificates, so
+  it cannot be converted to a standalone mobileconfig. The repository mapping
+  therefore emits the FileVault profile as Settings Catalog JSON
+  (`filevault_escrow`); a FileVault profile mapped to a mobileconfig still
+  drops the escrow payload with a warning.
 - **Platform SSO**: Full functionality requires Intune deployment
 - **Global App Store automatic updates**: Apple's DDM software-update settings
   declaration has no replacement for the legacy

@@ -34,9 +34,13 @@ profiles:
     notes: "Account management and login policies"
 
   - oib_name: "MacOS - OIB - Disk Encryption - D - FileVault - v1.0"
-    output_path: "system/filevault.mobileconfig"
+    output_path: "system/filevault.settings.json"
+    output_kind: "settings_catalog_json"
+    migration: "filevault_escrow"
     enabled: true
-    notes: "FileVault disk encryption configuration"
+    notes: >-
+      FileVault as native Settings Catalog JSON, carried verbatim, so that
+      Intune escrows the personal recovery key (a mobileconfig cannot)
 
   - oib_name: "MacOS - OIB - Firewall - D - Gatekeeper - v1.0"
     output_path: "system/gatekeeper.mobileconfig"
