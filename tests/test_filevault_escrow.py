@@ -256,7 +256,17 @@ def test_rejects_a_setting_moved_to_another_group(schema) -> None:
     source = filevault_source()
     moved = children_of(source, 0).pop()
     children_of(source, 1).append(moved)
-    with pytest.raises(OutputCompatibilityError, match="values or structure changed"):
+    with pytest.raises(OutputCompatibilityError, match="regrouped"):
+        BatchConverter._migrate_filevault_escrow(source, schema)
+
+
+def test_rejects_the_location_moved_out_of_an_empty_escrow_group(schema) -> None:
+    # Review of #59: the location child keeps its own value wherever it sits,
+    # so only the group check catches it leaving the escrow group.
+    source = filevault_source()
+    location = children_of(source, 2).pop()
+    children_of(source, 0).append(location)
+    with pytest.raises(OutputCompatibilityError, match="regrouped|no escrow location text"):
         BatchConverter._migrate_filevault_escrow(source, schema)
 
 

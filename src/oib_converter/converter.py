@@ -1390,6 +1390,23 @@ class BatchConverter:
                 for child in (groups[0].get("children") or [])
             ]
 
+        # Each top-level group must be a reviewed group holding exactly its own
+        # children. The comparison below takes upstream's child order, so it
+        # must not also take upstream's grouping: a location moved into the
+        # FileVault group, leaving the escrow group empty, would otherwise pass.
+        for instance in instances:
+            group_id = instance.get("settingDefinitionId")
+            if group_id not in FILEVAULT_ESCROW_SHAPE:
+                raise OutputCompatibilityError(
+                    f"filevault_escrow source has an unreviewed top-level setting "
+                    f"{group_id!r}; review the migration"
+                )
+            if sorted(child_order(instance)) != sorted(FILEVAULT_ESCROW_SHAPE[group_id]):
+                raise OutputCompatibilityError(
+                    f"filevault_escrow source regrouped the children of {group_id}; "
+                    "review the migration"
+                )
+
         expected_instances = []
         for instance in instances:
             group_id = instance.get("settingDefinitionId")
