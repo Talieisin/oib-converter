@@ -94,8 +94,38 @@ UNSUPPORTED_PAYLOAD_TYPES = {
     'com.apple.security.FDERecoveryKeyEscrow': (
         "FileVault Recovery Key Escrow requires EncryptCertPayloadUUID and a "
         "certificate payload that Intune injects automatically at deploy time. "
-        "This payload cannot function as a standalone mobileconfig."
+        "This payload cannot function as a standalone mobileconfig; map the "
+        "profile to settings_catalog_json with migration filevault_escrow instead."
     ),
+}
+
+
+# The reviewed shape of OIB's "Disk Encryption - D - FileVault" policy, used by
+# the filevault_escrow migration: each top-level group setting maps its child
+# setting IDs to the exact choice value, or None for the free-text escrow
+# location. Any difference upstream fails the conversion.
+FILEVAULT_ESCROW_TECHNOLOGIES = {"mdm", "appleRemoteManagement"}
+FILEVAULT_ESCROW_LOCATION_GROUP = (
+    "com.apple.security.fderecoverykeyescrow_com.apple.security.fderecoverykeyescrow"
+)
+FILEVAULT_ESCROW_LOCATION_ID = "com.apple.security.fderecoverykeyescrow_location"
+FILEVAULT_ESCROW_SHAPE: dict[str, dict[str, str | None]] = {
+    "com.apple.mcx.filevault2_com.apple.mcx.filevault2": {
+        # Enable = On
+        "com.apple.mcx.filevault2_enable": "com.apple.mcx.filevault2_enable_0",
+        "com.apple.mcx.filevault2_forceenableinsetupassistant": (
+            "com.apple.mcx.filevault2_forceenableinsetupassistant_true"
+        ),
+        "com.apple.mcx.filevault2_recoverykeyrotationinmonths": (
+            "com.apple.mcx.filevault2_recoverykeyrotationinmonths_6"
+        ),
+    },
+    "com.apple.mcx_com.apple.mcx-fdefilevaultoptions": {
+        "com.apple.mcx_dontallowfdedisable": "com.apple.mcx_dontallowfdedisable_true",
+    },
+    FILEVAULT_ESCROW_LOCATION_GROUP: {
+        FILEVAULT_ESCROW_LOCATION_ID: None,
+    },
 }
 
 
@@ -281,8 +311,22 @@ class GraphSchemaLoader:
             )
 
     def assert_settings_catalog_compatible(self, graph_json: dict[str, Any]) -> None:
-        """Validate DDM setting and choice identifiers against the live schema."""
+        """Validate setting and choice identifiers against the live schema.
+
+        Every setting must be deliverable through at least one of the
+        artifact's own ``technologies``. A DDM-only artifact
+        (``appleRemoteManagement``, assumed when the key is absent) therefore
+        accepts only DDM settings, while a policy shaped like the Intune
+        portal's (``mdm,appleRemoteManagement``) may also carry MDM settings.
+        """
         errors: list[str] = []
+        artifact_technologies = {
+            item.strip()
+            for item in str(
+                graph_json.get("technologies") or "appleRemoteManagement"
+            ).split(",")
+            if item.strip()
+        }
 
         def visit(value: Any) -> None:
             if isinstance(value, dict):
@@ -291,8 +335,14 @@ class GraphSchemaLoader:
                     definition = self.get_setting_definition(setting_id)
                     if not definition:
                         errors.append(f"unknown setting definition {setting_id}")
-                    elif "appleRemoteManagement" not in self.technologies_for(setting_id):
-                        errors.append(f"{setting_id} is not available through DDM")
+                    elif not self.technologies_for(setting_id) & artifact_technologies:
+                        if artifact_technologies == {"appleRemoteManagement"}:
+                            errors.append(f"{setting_id} is not available through DDM")
+                        else:
+                            errors.append(
+                                f"{setting_id} is not available through any of "
+                                f"{sorted(artifact_technologies)}"
+                            )
                     choice = value.get("choiceSettingValue")
                     if isinstance(choice, dict) and definition:
                         choice_id = choice.get("value")
@@ -1177,12 +1227,16 @@ class BatchConverter:
         full_output_path = self.output_root / output_path
 
         if output_kind == "settings_catalog_json":
-            if migration != "macos27_software_update":
+            migrations = {
+                "macos27_software_update": self._migrate_macos27_software_update,
+                "filevault_escrow": self._migrate_filevault_escrow,
+            }
+            if migration not in migrations:
                 raise OutputCompatibilityError(
                     "settings_catalog_json requires an explicit semantic migration; "
                     f"unsupported migration: {migration!r}"
                 )
-            artifact = self._migrate_macos27_software_update(json_data, converter.schema_loader)
+            artifact = migrations[migration](json_data, converter.schema_loader)
             converter.schema_loader.assert_settings_catalog_compatible(artifact)
             self._write_json(artifact, full_output_path)
             return
@@ -1202,6 +1256,206 @@ class BatchConverter:
     def _write_json(data: dict[str, Any], output_path: Path) -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    @staticmethod
+    def _migrate_filevault_escrow(
+        source: dict[str, Any], schema: GraphSchemaLoader
+    ) -> dict[str, Any]:
+        """Carry the OIB FileVault policy as native Settings Catalog JSON.
+
+        A converted mobileconfig cannot escrow the personal recovery key:
+        com.apple.security.FDERecoveryKeyEscrow needs the certificate Intune
+        injects at deploy time, so the mobileconfig path drops it (see
+        UNSUPPORTED_PAYLOAD_TYPES). A Settings Catalog policy gets that
+        certificate, so this migration keeps OIB's setting instances exactly
+        as upstream wrote them and removes only Graph read-back metadata.
+
+        Nothing is added, removed or re-valued. The source must match the
+        reviewed shape in FILEVAULT_ESCROW_SHAPE exactly; any other setting,
+        a missing one or a changed choice fails the conversion so that a
+        person reviews it. Only the escrow location text may change, since it
+        is the message shown to the user.
+        """
+        if source.get("platforms") != "macOS":
+            raise OutputCompatibilityError(
+                f"filevault_escrow source platforms must be 'macOS', got "
+                f"{source.get('platforms')!r}"
+            )
+        source_technologies = {
+            item.strip()
+            for item in str(source.get("technologies") or "").split(",")
+            if item.strip()
+        }
+        if source_technologies != FILEVAULT_ESCROW_TECHNOLOGIES:
+            raise OutputCompatibilityError(
+                "filevault_escrow source technologies changed from "
+                f"{sorted(FILEVAULT_ESCROW_TECHNOLOGIES)} to "
+                f"{sorted(source_technologies)}; review the migration"
+            )
+
+        raw_settings = source.get("settings")
+        if not isinstance(raw_settings, list):
+            raise OutputCompatibilityError("filevault_escrow source has no settings list")
+
+        expected_ids = set(FILEVAULT_ESCROW_SHAPE)
+        for children in FILEVAULT_ESCROW_SHAPE.values():
+            expected_ids |= set(children)
+        source_ids = list(iter_setting_definition_ids(raw_settings))
+        missing = sorted(expected_ids - set(source_ids))
+        unexpected = sorted(set(source_ids) - expected_ids)
+        duplicated = sorted({sid for sid in source_ids if source_ids.count(sid) > 1})
+        if missing or unexpected or duplicated:
+            details = []
+            if missing:
+                details.append("missing " + ", ".join(missing))
+            if unexpected:
+                details.append("unclassified " + ", ".join(unexpected))
+            if duplicated:
+                details.append("repeated " + ", ".join(duplicated))
+            raise OutputCompatibilityError(
+                "filevault_escrow source settings changed; review the migration: "
+                + "; ".join(details)
+            )
+
+        def strip_metadata(value: Any) -> Any:
+            # Graph read-back adds template references; a policy created
+            # without a template has them null, and Graph rejects nothing
+            # when they are absent. A non-null one means a template-backed
+            # policy, which this migration was not reviewed for.
+            if isinstance(value, dict):
+                cleaned: dict[str, Any] = {}
+                for key, child in value.items():
+                    if key in ("settingInstanceTemplateReference",
+                               "settingValueTemplateReference"):
+                        if child is not None:
+                            raise OutputCompatibilityError(
+                                f"filevault_escrow source carries a {key}; "
+                                "review the migration"
+                            )
+                        continue
+                    cleaned[key] = strip_metadata(child)
+                return cleaned
+            if isinstance(value, list):
+                return [strip_metadata(child) for child in value]
+            return value
+
+        instances: list[dict[str, Any]] = []
+        for index, entry in enumerate(raw_settings):
+            if not isinstance(entry, dict) or not isinstance(
+                entry.get("settingInstance"), dict
+            ):
+                raise OutputCompatibilityError(
+                    f"filevault_escrow source settings[{index}] has no settingInstance"
+                )
+            instances.append(strip_metadata(entry["settingInstance"]))
+
+        location = None
+        for instance in instances:
+            if instance.get("settingDefinitionId") == FILEVAULT_ESCROW_LOCATION_GROUP:
+                for group in instance.get("groupSettingCollectionValue") or []:
+                    for child in group.get("children") or []:
+                        if child.get("settingDefinitionId") == FILEVAULT_ESCROW_LOCATION_ID:
+                            location = (child.get("simpleSettingValue") or {}).get("value")
+        if not isinstance(location, str) or not location.strip():
+            raise OutputCompatibilityError(
+                "filevault_escrow source has no escrow location text"
+            )
+
+        # Compare with the reviewed shape built from the table. Upstream's
+        # order of the three groups and of their children is kept.
+        group_type = (
+            "#microsoft.graph.deviceManagementConfigurationGroupSettingCollectionInstance"
+        )
+        choice_type = "#microsoft.graph.deviceManagementConfigurationChoiceSettingInstance"
+        simple_type = "#microsoft.graph.deviceManagementConfigurationSimpleSettingInstance"
+        string_type = "#microsoft.graph.deviceManagementConfigurationStringSettingValue"
+
+        def expected_child(setting_id: str, choice: str | None) -> dict[str, Any]:
+            if choice is None:
+                return {
+                    "@odata.type": simple_type,
+                    "settingDefinitionId": setting_id,
+                    "simpleSettingValue": {"@odata.type": string_type, "value": location},
+                }
+            return {
+                "@odata.type": choice_type,
+                "settingDefinitionId": setting_id,
+                "choiceSettingValue": {"value": choice, "children": []},
+            }
+
+        def child_order(instance: dict[str, Any]) -> list[str]:
+            groups = instance.get("groupSettingCollectionValue") or [{}]
+            return [
+                child.get("settingDefinitionId")
+                for child in (groups[0].get("children") or [])
+            ]
+
+        # Each top-level group must be a reviewed group holding exactly its own
+        # children. The comparison below takes upstream's child order, so it
+        # must not also take upstream's grouping: a location moved into the
+        # FileVault group, leaving the escrow group empty, would otherwise pass.
+        for instance in instances:
+            group_id = instance.get("settingDefinitionId")
+            if group_id not in FILEVAULT_ESCROW_SHAPE:
+                raise OutputCompatibilityError(
+                    f"filevault_escrow source has an unreviewed top-level setting "
+                    f"{group_id!r}; review the migration"
+                )
+            if sorted(child_order(instance)) != sorted(FILEVAULT_ESCROW_SHAPE[group_id]):
+                raise OutputCompatibilityError(
+                    f"filevault_escrow source regrouped the children of {group_id}; "
+                    "review the migration"
+                )
+
+        expected_instances = []
+        for instance in instances:
+            group_id = instance.get("settingDefinitionId")
+            children = FILEVAULT_ESCROW_SHAPE.get(group_id, {})
+            expected_instances.append({
+                "@odata.type": group_type,
+                "settingDefinitionId": group_id,
+                "groupSettingCollectionValue": [{
+                    "children": [
+                        expected_child(child_id, children.get(child_id))
+                        for child_id in child_order(instance)
+                    ],
+                }],
+            })
+        if instances != expected_instances:
+            changed = sorted(
+                f"{actual.get('settingDefinitionId')}"
+                for actual, expected in zip(instances, expected_instances, strict=True)
+                if actual != expected
+            )
+            raise OutputCompatibilityError(
+                "filevault_escrow source values or structure changed; review the "
+                "migration: " + ", ".join(changed)
+            )
+
+        return {
+            "name": source.get("name") or "MacOS - OIB - Disk Encryption - D - FileVault - v1.0",
+            "description": (
+                "OIB FileVault policy carried verbatim as native Settings Catalog JSON, "
+                "so that Intune escrows the personal recovery key. Generated by "
+                "oib-converter (migration filevault_escrow)."
+            ),
+            "platforms": "macOS",
+            "technologies": "mdm,appleRemoteManagement",
+            "settings": instances,
+            "source_coverage": {
+                "verbatim": {
+                    group_id: sorted(children)
+                    for group_id, children in FILEVAULT_ESCROW_SHAPE.items()
+                },
+                "not_added": {
+                    "com.apple.mcx.filevault2_defer": (
+                        "OIB does not set Defer, so this migration does not add it. "
+                        "Microsoft's FileVault guidance recommends Defer = Enabled; "
+                        "that is a decision for the consuming repository."
+                    ),
+                },
+            },
+        }
 
     @staticmethod
     def _migrate_macos27_software_update(
